@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "grantd",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-09-01",
+  // Ed25519 verification in Web Crypto is what lets the Worker check host and
+  // agent signatures without shipping a crypto library.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    "PUBLIC_ORIGIN": ""
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "HOSTS", "class_name": "HostDO" },
+      { "name": "AGENTS", "class_name": "AgentDO" },
+      { "name": "CHALLENGES", "class_name": "ChallengeDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      // SQLite-backed from the start: the storage model never has to be
+      // migrated away from key-value later.
+      "new_sqlite_classes": ["HostDO", "AgentDO", "ChallengeDO"]
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "RELEASES", "bucket_name": "grantd-releases" }
+  ],
+  // Rate limiters. The IP-keyed ones make mass registration expensive in a
+  // second dimension alongside the captcha's proof of work. The grant-keyed one
+  // exists because an edge WAF rule cannot see grant_id — it lives in the
+  // request body — and a distributed flood against a single grant is what would
+  // otherwise let anyone repeatedly wake a customer's machine.
+  "ratelimits": [
+    { "name": "CHALLENGE_LIMITER", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } },
+    { "name": "REGISTRATION_LIMITER", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } },
+    { "name": "REDEMPTION_LIMITER", "namespace_id": "1003", "simple": { "limit": 30, "period": 60 } },
+    { "name": "REDEMPTION_GRANT_LIMITER", "namespace_id": "1004", "simple": { "limit": 10, "period": 60 } }
+  ]
+}

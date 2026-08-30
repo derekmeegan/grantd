@@ -1,0 +1,183 @@
+/**
+ * The API is the documentation.
+ *
+ * A visiting agent arrives holding nothing but a URL. Everything it needs to
+ * get from that URL to an SSH session has to be discoverable with curl, so
+ * these endpoints return plain text describing the exact requests to make.
+ * There is no SDK to install and no client library to be out of date.
+ */
+
+export function docsMarkdown(origin: string): string {
+  return `# grantd
+
+Temporary, single-use SSH access for agents.
+
+This service is a **router**. It never holds an SSH CA private key, a host
+identity private key, a grant secret, or a visiting agent's SSH private key.
+Access is authorized by an HMAC keyed with a secret that only travels in a URL
+fragment, from the grant's owner to its recipient, out of band.
+
+Protocol version: 1. Canonical encoding, message schemas and error codes are
+specified in \`protocol/v1.md\` in the source repository.
+
+## If you were given a capability URL
+
+    https://…/g/<host_id>/<grant_id>#<secret>
+
+Fetch the path part for instructions:
+
+    curl ${origin}/g/<host_id>/<grant_id>
+
+Keep the fragment — everything after \`#\` — on your own machine. It is the
+capability. This service cannot see it, cannot recover it, and cannot help you
+if you paste it somewhere public.
+
+## Endpoints
+
+    GET    /                                             this document
+    GET    /health
+
+    POST   /v1/agent-challenges                          start Agent Captcha
+    POST   /v1/agents                                    register an agent identity
+    GET    /v1/agents/:agent_id
+
+    PUT    /v1/hosts/:host_id                            register a host (host-signed)
+    GET    /v1/hosts/:host_id
+    GET    /v1/hosts/:host_id/connect                    rendezvous WebSocket (host only)
+    PUT    /v1/hosts/:host_id/grants/:grant_id           publish signed grant metadata
+    GET    /v1/hosts/:host_id/grants/:grant_id
+    DELETE /v1/hosts/:host_id/grants/:grant_id           withdraw published metadata
+    POST   /v1/hosts/:host_id/grants/:grant_id/redeem    redeem a capability
+
+    GET    /g/:host_id/:grant_id                         redemption instructions
+    GET    /install                                      host installer
+    GET    /releases/…                                   signed release artifacts
+
+## Registering an agent identity
+
+Agent registration is self-service and requires no account, no email and no API
+key. Generate an Ed25519 keypair; your \`agent_id\` is
+\`"a_" + base32(sha256(public_key)[0:20])\` using the lowercase RFC 4648
+alphabet without padding.
+
+    curl -sX POST ${origin}/v1/agent-challenges
+
+You receive a proof-of-work prefix, a difficulty in bits, and a short question.
+Find a nonce such that \`sha256(prefix_bytes || utf8(nonce))\` has at least that
+many leading zero bits, answer the question, and sign the registration message
+with your identity key. Being registered authorizes nothing on its own.
+
+## Error codes
+
+Errors are \`{"error":{"code":"…","message":"…"}}\`. Codes include
+\`BAD_PROOF\`, \`GRANT_ALREADY_REDEEMED\`, \`GRANT_EXPIRED\`, \`HOST_OFFLINE\`,
+\`HOST_TIMEOUT\`, \`RATE_LIMITED\`. Branch on \`code\`, not on prose.
+`;
+}
+
+export function grantInstructions(origin: string, hostId: string, grantId: string): string {
+  return `grantd SSH grant
+
+Host:  ${hostId}
+Grant: ${grantId}
+
+This page never receives the capability secret. It is the part of your URL after
+the '#', and browsers and HTTP clients do not transmit fragments. Keep it local.
+
+Redeem it like this.
+
+1. Have an agent identity.
+
+   Generate an Ed25519 keypair if you do not have one. Your agent_id is
+   "a_" + base32(sha256(public_key)[0:20]), lowercase RFC 4648, no padding.
+   Register it:
+
+     curl -sX POST ${origin}/v1/agent-challenges
+
+   Solve the returned proof of work and question, then POST the signed
+   registration to ${origin}/v1/agents
+
+2. Generate a throwaway SSH key. It must be ed25519, and it must never leave
+   your machine.
+
+     ssh-keygen -t ed25519 -N '' -C '' -f ./grantd-key
+
+3. Build the redemption payload. Field order matters for the canonical
+   encoding, but in JSON it is just an object:
+
+     {
+       "version": 1,
+       "host_id": "${hostId}",
+       "grant_id": "${grantId}",
+       "agent_id": "<your agent id>",
+       "agent_public_key": "<base64url of your 32-byte identity public key>",
+       "ssh_public_key": "ssh-ed25519 AAAA...",   // exactly two fields, no comment
+       "timestamp": <unix seconds>,
+       "nonce": "<base64url of 16 random bytes>"
+     }
+
+   The ssh_public_key string is covered by the proof below, so submit it byte
+   for byte as you will use it.
+
+4. Compute two things over the canonical encoding of that payload
+   (see protocol/v1.md for the exact bytes):
+
+     agent_signature = Ed25519(agent_key, CBE("grantd/v1/redemption-agent-sig", payload))
+     proof           = HMAC-SHA256(secret, CBE("grantd/v1/redemption-proof", payload))
+
+   where 'secret' is the 32 bytes your URL fragment base64url-decodes to.
+   Do not send the secret. The proof is what authorizes issuance, and it is
+   verified on the customer's own machine.
+
+5. POST it:
+
+     curl -sX POST ${origin}/v1/hosts/${hostId}/grants/${grantId}/redeem \\
+       -H 'content-type: application/json' \\
+       -d @redemption.json
+
+   On success you receive hostname, port, user, and a certificate.
+
+6. Save the certificate next to your key and connect:
+
+     printf '%s\\n' "$certificate" > ./grantd-key-cert.pub
+     ssh -i ./grantd-key -o CertificateFile=./grantd-key-cert.pub \\
+       -p "$port" "$user@$hostname"
+
+Notes.
+
+  The grant is single-use. The first (agent, SSH key) pair to present a valid
+  proof wins; everyone else gets GRANT_ALREADY_REDEEMED. Retrying the identical
+  request returns the identical certificate, so a lost response is safe to
+  retry.
+
+  The certificate expires when the grant does. There is no renewal.
+
+  If you get HOST_OFFLINE, the machine is not currently connected. The grant is
+  still valid until it expires; try again.
+`;
+}
+
+export function installScript(origin: string): string {
+  return `#!/bin/sh
+# grantd installer bootstrap.
+#
+# This fetches the real installer and its signature from the release bucket and
+# refuses to run anything it cannot verify. Piping this straight into a shell is
+# the convention; read it first if you would rather not.
+set -eu
+
+ORIGIN="${origin}"
+VERSION="\${GRANTD_VERSION:-latest}"
+
+echo "grantd installer" >&2
+echo "  origin:  $ORIGIN" >&2
+echo "  version: $VERSION" >&2
+echo >&2
+echo "Fetch install/install.sh from the repository and run it with:" >&2
+echo "  sudo ./install.sh --origin $ORIGIN --ssh-user <account> --hostname <address>" >&2
+echo >&2
+echo "Automatic updates are deliberately not implemented: a compromise of this" >&2
+echo "release infrastructure must not become a path onto customer machines." >&2
+exit 0
+`;
+}

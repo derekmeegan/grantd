@@ -1,0 +1,72 @@
+/** Protocol error codes and the uniform error envelope — protocol/v1.md §10. */
+
+export const ERR = {
+  BAD_REQUEST: "BAD_REQUEST",
+  UNSUPPORTED_VERSION: "UNSUPPORTED_VERSION",
+  ID_MISMATCH: "ID_MISMATCH",
+  BAD_SIGNATURE: "BAD_SIGNATURE",
+  STALE_TIMESTAMP: "STALE_TIMESTAMP",
+  REPLAYED_NONCE: "REPLAYED_NONCE",
+  HOST_NOT_FOUND: "HOST_NOT_FOUND",
+  GRANT_NOT_FOUND: "GRANT_NOT_FOUND",
+  AGENT_NOT_FOUND: "AGENT_NOT_FOUND",
+  CHALLENGE_NOT_FOUND: "CHALLENGE_NOT_FOUND",
+  CHALLENGE_CONSUMED: "CHALLENGE_CONSUMED",
+  BAD_ANSWER: "BAD_ANSWER",
+  HOST_OFFLINE: "HOST_OFFLINE",
+  HOST_TIMEOUT: "HOST_TIMEOUT",
+  GRANT_EXPIRED: "GRANT_EXPIRED",
+  GRANT_REVOKED: "GRANT_REVOKED",
+  GRANT_ALREADY_REDEEMED: "GRANT_ALREADY_REDEEMED",
+  BAD_PROOF: "BAD_PROOF",
+  RATE_LIMITED: "RATE_LIMITED",
+  TOO_MANY_GRANTS: "TOO_MANY_GRANTS",
+  INTERNAL: "INTERNAL",
+} as const;
+
+export type ErrorCode = (typeof ERR)[keyof typeof ERR];
+
+const STATUS: Record<string, number> = {
+  BAD_REQUEST: 400,
+  UNSUPPORTED_VERSION: 400,
+  ID_MISMATCH: 400,
+  BAD_SIGNATURE: 401,
+  STALE_TIMESTAMP: 401,
+  REPLAYED_NONCE: 401,
+  BAD_ANSWER: 401,
+  BAD_PROOF: 401,
+  HOST_NOT_FOUND: 404,
+  GRANT_NOT_FOUND: 404,
+  AGENT_NOT_FOUND: 404,
+  CHALLENGE_NOT_FOUND: 404,
+  CHALLENGE_CONSUMED: 409,
+  GRANT_ALREADY_REDEEMED: 409,
+  GRANT_EXPIRED: 410,
+  GRANT_REVOKED: 410,
+  RATE_LIMITED: 429,
+  TOO_MANY_GRANTS: 429,
+  HOST_OFFLINE: 503,
+  HOST_TIMEOUT: 504,
+};
+
+export function statusFor(code: string): number {
+  return STATUS[code] ?? 500;
+}
+
+export function errorResponse(code: string, message: string, status?: number): Response {
+  return new Response(JSON.stringify({ error: { code, message } }), {
+    status: status ?? statusFor(code),
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+export function jsonResponse(body: unknown, status = 200, headers: HeadersInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...headers },
+  });
+}
+
+export function textResponse(body: string, status = 200, contentType = "text/plain; charset=utf-8"): Response {
+  return new Response(body, { status, headers: { "content-type": contentType } });
+}
