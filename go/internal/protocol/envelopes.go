@@ -110,12 +110,19 @@ func (r *RedemptionRequest) UnmarshalJSON(data []byte) error {
 
 // RedemptionResponse is what a successful redeemer receives. Everything in it
 // is public: it is enough to open an SSH connection and nothing more.
+//
+// Serial is carried as a decimal string. It is a random uint64, and a JSON
+// number that large does not survive a parser backed by float64 — which is most
+// of them, including every browser and the Worker itself. It is an identifier,
+// not an arithmetic quantity, so a string costs nothing and removes a class of
+// "the serial in the audit log does not match the serial in the certificate"
+// bugs entirely.
 type RedemptionResponse struct {
 	Hostname       string `json:"hostname"`
 	Port           uint64 `json:"port"`
 	User           string `json:"user"`
 	Certificate    string `json:"certificate"`
-	Serial         uint64 `json:"serial"`
+	Serial         uint64 `json:"serial,string"`
 	KeyID          string `json:"key_id"`
 	ValidBefore    int64  `json:"valid_before"`
 	ValidBeforeStr string `json:"valid_before_rfc3339,omitempty"`

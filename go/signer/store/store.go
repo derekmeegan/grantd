@@ -191,6 +191,36 @@ func (s *Store) MarkPublished(ctx context.Context, id string, at int64) error {
 	return err
 }
 
+// PendingPublications returns grants whose public metadata has not yet been
+// accepted by the coordination service and which are still worth publishing.
+//
+// The daemon polls this instead of being pushed to. Polling is the failure
+// tolerant direction: a grant created while the network is down is published as
+// soon as connectivity returns, with no queue to lose and no notification to
+// miss.
+func (s *Store) PendingPublications(ctx context.Context, now int64) ([]Grant, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, ssh_user, created_at, expires_at
+          FROM grants
+         WHERE published_at IS NULL
+           AND revoked_at IS NULL
+           AND expires_at > ?
+         ORDER BY created_at ASC`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Grant
+	for rows.Next() {
+		var g Grant
+		if err := rows.Scan(&g.ID, &g.SSHUser, &g.CreatedAt, &g.ExpiresAt); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // ListGrants returns every grant, newest first, without secrets.
 func (s *Store) ListGrants(ctx context.Context) ([]GrantView, error) {
 	rows, err := s.db.QueryContext(ctx, `

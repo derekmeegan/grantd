@@ -262,6 +262,36 @@ func (s *Signer) CreateGrant(ctx context.Context, ttlSeconds int64) (NewGrant, e
 	}, nil
 }
 
+// PendingPublications returns signed public metadata for every grant the
+// daemon still needs to publish. The signature is produced here; the daemon
+// only relays it.
+func (s *Signer) PendingPublications(ctx context.Context) ([]protocol.GrantPublishRequest, error) {
+	h, err := s.store.Host(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := s.store.PendingPublications(ctx, s.now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]protocol.GrantPublishRequest, 0, len(pending))
+	for _, g := range pending {
+		msg := protocol.Grant{
+			Version: protocol.Version, HostID: h.HostID, GrantID: g.ID,
+			SSHUser: g.SSHUser, CreatedAt: g.CreatedAt, ExpiresAt: g.ExpiresAt,
+		}
+		canon, err := msg.Canonical()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, protocol.GrantPublishRequest{
+			Grant:     msg,
+			Signature: ed25519.Sign(s.identity, canon),
+		})
+	}
+	return out, nil
+}
+
 // ListGrants returns local grant state without secrets.
 func (s *Signer) ListGrants(ctx context.Context) ([]store.GrantView, error) {
 	return s.store.ListGrants(ctx)

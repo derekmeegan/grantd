@@ -9,7 +9,17 @@
 
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { b64uDecode, b64uEncode } from "../src/crypto/encoding";
 import { ORIGIN, TestAgent, TestHost, newGrantId, now, randomBytes, sshLine } from "./helpers";
+
+/** Frames carry opaque bytes, so a test host encodes its answers the same way. */
+function encodeBody(value: unknown): string {
+  return b64uEncode(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+function decodeBody(b64: string): unknown {
+  return JSON.parse(new TextDecoder().decode(b64uDecode(b64)));
+}
 
 async function errCode(res: Response): Promise<string> {
   const body = (await res.json()) as { error?: { code?: string } };
@@ -29,7 +39,9 @@ function respondWithBadProof(ws: WebSocket): void {
         t: "redeem.response",
         id: frame.id,
         status: 401,
-        body: { error: { code: "BAD_PROOF", message: "redemption proof does not verify" } },
+        body_b64: encodeBody({
+          error: { code: "BAD_PROOF", message: "redemption proof does not verify" },
+        }),
       }),
     );
   });
@@ -312,13 +324,16 @@ describe("redemption routing", () => {
     ws.addEventListener("message", (e) => {
       const frame = JSON.parse(String(e.data));
       if (frame.t !== "redeem.request") return;
-      forwarded = frame.body;
+      forwarded = decodeBody(frame.body_b64) as Record<string, unknown>;
       ws.send(
         JSON.stringify({
           t: "redeem.response",
           id: frame.id,
           status: 200,
-          body: { certificate: "ssh-ed25519-cert-v01@openssh.com AAAA", user: "ubuntu" },
+          body_b64: encodeBody({
+            certificate: "ssh-ed25519-cert-v01@openssh.com AAAA",
+            user: "ubuntu",
+          }),
         }),
       );
     });
@@ -338,6 +353,46 @@ describe("redemption routing", () => {
     ws.close();
   });
 
+  it("relays a 64-bit certificate serial without losing precision", async () => {
+    const host = await TestHost.create();
+    const agent = await TestAgent.create();
+    await host.register();
+    const grantId = newGrantId();
+    await host.publishGrant(grantId);
+    const ws = await host.connect();
+
+    // A certificate serial is a random uint64. JSON.parse turns that into a
+    // float64, and float64 cannot represent it — the value comes back rounded.
+    // Relaying the host's answer as opaque bytes is what keeps the serial in
+    // the response equal to the serial actually in the certificate.
+    const serial = "5177954190189569593";
+    ws.addEventListener("message", (e) => {
+      const frame = JSON.parse(String(e.data));
+      if (frame.t !== "redeem.request") return;
+      ws.send(
+        JSON.stringify({
+          t: "redeem.response",
+          id: frame.id,
+          status: 200,
+          body_b64: b64uEncode(
+            new TextEncoder().encode(`{"serial":${serial},"user":"ubuntu"}`),
+          ),
+        }),
+      );
+    });
+
+    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
+      method: "POST",
+      body: JSON.stringify(await agent.redemptionBody(host.hostId, grantId, randomBytes(32))),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(200);
+    // Compared as text, because parsing it here would reintroduce the very
+    // rounding the test is about.
+    expect(await res.text()).toContain(`"serial":${serial}`);
+    ws.close();
+  });
+
   it("relays the host's rejection code rather than masking it", async () => {
     const host = await TestHost.create();
     const agent = await TestAgent.create();
@@ -354,7 +409,9 @@ describe("redemption routing", () => {
           t: "redeem.response",
           id: frame.id,
           status: 401,
-          body: { error: { code: "BAD_PROOF", message: "redemption proof does not verify" } },
+          body_b64: encodeBody({
+            error: { code: "BAD_PROOF", message: "redemption proof does not verify" },
+          }),
         }),
       );
     });

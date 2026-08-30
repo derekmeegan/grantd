@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,6 +80,32 @@ func truncate(b []byte, n int) string {
 // AnswerFunc answers an Agent Captcha question. In production this is the
 // agent's own model reading the question; in CI it is the reference solver.
 type AnswerFunc func(question string) (string, error)
+
+// AgentExists reports whether the service already knows this identity, so that
+// a repeat visit does not pay for a proof of work it does not need.
+func (c *Client) AgentExists(ctx context.Context, agentID string) (bool, error) {
+	err := c.do(ctx, http.MethodGet, "/v1/agents/"+agentID, nil, nil)
+	if err == nil {
+		return true, nil
+	}
+	var apiErr protocol.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == protocol.ErrCodeAgentNotFound {
+		return false, nil
+	}
+	return false, err
+}
+
+// EnsureRegistered registers the identity if the service does not know it yet.
+func (c *Client) EnsureRegistered(ctx context.Context, ident *Identity, answer AnswerFunc) error {
+	known, err := c.AgentExists(ctx, ident.ID)
+	if err != nil {
+		return err
+	}
+	if known {
+		return nil
+	}
+	return c.Register(ctx, ident, answer)
+}
 
 // Register performs the full Agent Captcha flow and enrolls the identity's
 // public key.

@@ -45,6 +45,8 @@ func (s *Server) DaemonHandler() http.Handler {
 	mux.HandleFunc("POST /redeem", s.redeem)
 	mux.HandleFunc("GET /registration", s.registration)
 	mux.HandleFunc("POST /connect-auth", s.connectAuth)
+	mux.HandleFunc("GET /pending-publications", s.pendingPublications)
+	mux.HandleFunc("POST /grants/{id}/published", s.markPublished)
 	mux.HandleFunc("GET /status", s.status)
 	return withRecover(mux, s.Log)
 }
@@ -240,6 +242,18 @@ func (s *Server) registration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, reg)
+}
+
+func (s *Server) pendingPublications(w http.ResponseWriter, r *http.Request) {
+	pubs, err := s.Signer.PendingPublications(r.Context())
+	if err != nil {
+		writeErr(w, protocol.ErrCodeInternal, err.Error())
+		return
+	}
+	// Public metadata only. Nothing here reveals a grant secret, so a
+	// compromised daemon reading this list learns which grants exist and when
+	// they expire, and nothing that would let it redeem one.
+	writeJSON(w, http.StatusOK, map[string]any{"publications": pubs})
 }
 
 type connectAuthRequest struct {

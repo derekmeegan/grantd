@@ -354,7 +354,7 @@ export class HostDO extends DurableObject<Env> {
     if (typeof message !== "string") return;
     if (message.length > 128 * 1024) return;
 
-    let frame: { t?: unknown; id?: unknown; status?: unknown; body?: unknown };
+    let frame: { t?: unknown; id?: unknown; status?: unknown; body_b64?: unknown };
     try {
       frame = JSON.parse(message);
     } catch {
@@ -379,8 +379,20 @@ export class HostDO extends DurableObject<Env> {
           status === 200 ? "issued" : "rejected",
           frame.id,
         );
+        // The host's answer is relayed as opaque bytes. Parsing and
+        // re-serializing it here would put this service in a position to
+        // reshape the host's verdict, and would silently corrupt any 64-bit
+        // value in it — a certificate serial does not survive a trip through
+        // float64.
+        let body: Uint8Array;
+        try {
+          body = b64uDecode(typeof frame.body_b64 === "string" ? frame.body_b64 : "");
+        } catch {
+          waiter.resolve(errorResponse(ERR.INTERNAL, "malformed response from host"));
+          return;
+        }
         waiter.resolve(
-          new Response(JSON.stringify(frame.body ?? {}), {
+          new Response(body, {
             status,
             headers: { "content-type": "application/json; charset=utf-8" },
           }),
@@ -579,10 +591,15 @@ export class HostDO extends DurableObject<Env> {
       }),
     );
 
-    // The envelope is forwarded byte-for-byte. Re-serializing it here would
-    // mean the host verifies bytes this service produced rather than bytes the
-    // agent signed, which is exactly the substitution the design forbids.
-    const frame = JSON.stringify({ t: "redeem.request", id: requestId, body: JSON.parse(raw) });
+    // The envelope is forwarded byte-for-byte, as opaque base64. Re-serializing
+    // it would mean the host verifies bytes this service produced rather than
+    // bytes the agent signed, which is exactly the substitution the design
+    // forbids.
+    const frame = JSON.stringify({
+      t: "redeem.request",
+      id: requestId,
+      body_b64: b64uEncode(new TextEncoder().encode(raw)),
+    });
 
     return await new Promise<Response>((resolve) => {
       const timer = setTimeout(() => {
