@@ -1,0 +1,29 @@
+# build output
+/bin/
+/dist/
+/go/bin/
+
+# node
+node_modules/
+*.tsbuildinfo
+
+# wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# local state and key material — never commit these
+*.db
+*.db-wal
+*.db-shm
+*.pem
+host_identity
+host_identity.pub
+ssh_ca
+ssh_ca.pub
+id_ed25519*
+*-cert.pub
+
+# scratch
+/tmp/
+.DS_Store
