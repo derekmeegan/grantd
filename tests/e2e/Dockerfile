@@ -14,7 +14,8 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99grantd-bootstrap \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      openssh-server ca-certificates curl jq util-linux procps \
+      openssh-server openssh-client ca-certificates curl jq util-linux procps \
+      python3 coreutils \
  && rm -f /etc/apt/apt.conf.d/99grantd-bootstrap \
  && rm -rf /var/lib/apt/lists/*
 
@@ -26,10 +27,15 @@ RUN useradd -m -s /bin/bash ubuntu \
  && useradd -r -M -s /usr/sbin/nologin grantd \
  && useradd -r -M -s /usr/sbin/nologin grantsigner
 
-COPY grantd grant-signer grantctl grant-agent /usr/local/bin/
+# Only the two daemons are installed. There is deliberately no grantd client
+# binary here: the owner mints grants with curl over a Unix socket, and a
+# visitor redeems with install/redeem.sh, which is curl, openssl and ssh-keygen.
+# If those paths work, the "no SDK required" claim is true rather than asserted.
+COPY grantd grant-signer /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY redeem.sh cbe-vectors.sh /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/grantd /usr/local/bin/grant-signer \
-      /usr/local/bin/grantctl /usr/local/bin/grant-agent /usr/local/bin/entrypoint.sh
+      /usr/local/bin/redeem.sh /usr/local/bin/cbe-vectors.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 22
 CMD ["/usr/local/bin/entrypoint.sh"]

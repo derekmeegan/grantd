@@ -175,7 +175,7 @@ mkdir -p "$STAGE"
 
 if [ -n "$LOCAL_DIR" ]; then
   log "installing from $LOCAL_DIR"
-  for b in grantd grant-signer grantctl grant-agent; do
+  for b in grantd grant-signer; do
     [ -f "$LOCAL_DIR/$b" ] || die "missing binary: $LOCAL_DIR/$b"
     cp "$LOCAL_DIR/$b" "$STAGE/$b"
   done
@@ -190,7 +190,7 @@ else
   fi
   log "downloading grantd $VERSION (linux/$ARCH)"
   BASE="$RELEASES_URL/$VERSION"
-  for b in grantd grant-signer grantctl grant-agent; do
+  for b in grantd grant-signer; do
     curl -fsSL "$BASE/${b}-linux-${ARCH}" -o "$STAGE/$b" || die "could not download $b"
   done
   curl -fsSL "$BASE/SHA256SUMS" -o "$STAGE/SHA256SUMS" || die "could not download SHA256SUMS"
@@ -207,7 +207,7 @@ else
     || die "release signature does not verify; refusing to install"
 
   log "verifying artifact hashes"
-  ( cd "$STAGE" && grep -E " (grantd|grant-signer|grantctl|grant-agent)-linux-${ARCH}\$" SHA256SUMS \
+  ( cd "$STAGE" && grep -E " (grantd|grant-signer)-linux-${ARCH}\$" SHA256SUMS \
       | while read -r sum name; do
           base="${name%-linux-${ARCH}}"
           echo "$sum  $base"
@@ -215,7 +215,7 @@ else
     sha256sum -c verify.txt >/dev/null ) || die "artifact hash mismatch; refusing to install"
 fi
 
-chmod 0755 "$STAGE"/grantd "$STAGE"/grant-signer "$STAGE"/grantctl "$STAGE"/grant-agent
+chmod 0755 "$STAGE"/grantd "$STAGE"/grant-signer
 
 # -------------------------------------------------------------------- accounts
 
@@ -237,11 +237,9 @@ SIGNER_UID="$(id -u grantsigner)"
 
 log "installing binaries and state directories"
 install -d -m 0755 "$LIBDIR"
-for b in grantd grant-signer grantctl grant-agent; do
+for b in grantd grant-signer; do
   install -m 0755 "$STAGE/$b" "$LIBDIR/$b"
 done
-ln -sf "$LIBDIR/grantctl" "$BINDIR/grantctl"
-ln -sf "$LIBDIR/grant-agent" "$BINDIR/grant-agent"
 
 install -d -m 0700 -o grantsigner -g grantsigner "$CONFDIR"
 install -d -m 0700 -o grantsigner -g grantsigner "$STATEDIR"
@@ -364,7 +362,14 @@ $(log "grantd installed")
 
 Mint a 30-minute capability as $SSH_USER:
 
-    grantctl new --ttl 30m
+    curl -s --unix-socket /run/grantd/owner/owner.sock \\
+      -X POST http://localhost/grants \\
+      -H 'content-type: application/json' \\
+      -d '{"ttl_seconds":1800}'
+
+The capability_url in the reply is the whole thing. There is no client to
+install: the owner API is a Unix socket, and a recipient redeems with curl,
+openssl and ssh-keygen.
 
 Send the whole URL, including the part after '#', to the recipient over a
 channel you trust. That fragment is the capability; this machine keeps the only

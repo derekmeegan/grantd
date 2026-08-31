@@ -13,6 +13,9 @@ import { ERR, errorResponse, jsonResponse, textResponse } from "./errors";
 import { AGENT_ID_RE, GRANT_ID_RE, HOST_ID_RE, newChallengeId } from "./crypto/ids";
 import { MAX_REQUEST_BYTES } from "./protocol";
 import { docsMarkdown, grantInstructions, installScript } from "./routes/docs";
+// Imported as text so there is exactly one copy of this script in the
+// repository: the one install/ ships and the test suite runs.
+import redeemScript from "../../install/redeem.sh";
 import type { Env, RateLimiter } from "./env";
 
 export { HostDO } from "./durable-objects/host";
@@ -40,6 +43,9 @@ async function route(request: Request, env: Env, _ctx: ExecutionContext): Promis
   }
   if (request.method === "GET" && seg[0] === "health") {
     return jsonResponse({ ok: true, protocol_version: 1 });
+  }
+  if (request.method === "GET" && seg[0] === "redeem.sh") {
+    return textResponse(redeemScript, 200, "text/x-shellscript; charset=utf-8");
   }
   if (request.method === "GET" && seg[0] === "install") {
     return textResponse(installScript(origin), 200, "text/x-shellscript; charset=utf-8");
@@ -166,7 +172,7 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
           new Request(`https://do/host/${hostId}/grants/${grantId}`, { method: "GET" }),
         );
       }
-      if (request.method === "PUT" || request.method === "DELETE") {
+      if (request.method === "PUT") {
         const body = await readJson(request);
         if (body instanceof Response) return body;
         return await stub.fetch(

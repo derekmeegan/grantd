@@ -112,8 +112,7 @@ export class HostDO extends DurableObject<Env> {
         ssh_user      TEXT NOT NULL,
         created_at    INTEGER NOT NULL,
         expires_at    INTEGER NOT NULL,
-        published_at  INTEGER NOT NULL,
-        withdrawn_at  INTEGER
+        published_at  INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS redemptions (
         request_id   TEXT PRIMARY KEY,
@@ -155,7 +154,6 @@ export class HostDO extends DurableObject<Env> {
       if (rest[0] === "grants" && rest.length === 2) {
         if (request.method === "PUT") return await this.publishGrant(request, rest[1]);
         if (request.method === "GET") return this.grantRecord(rest[1]);
-        if (request.method === "DELETE") return await this.withdrawGrant(request, rest[1]);
       }
       if (request.method === "POST" && rest[0] === "grants" && rest[2] === "redeem") {
         return await this.redeem(request, rest[1]);
@@ -444,7 +442,7 @@ export class HostDO extends DurableObject<Env> {
     }
 
     const active = this.sql
-      .exec("SELECT COUNT(*) AS n FROM grants WHERE expires_at > ? AND withdrawn_at IS NULL", now)
+      .exec("SELECT COUNT(*) AS n FROM grants WHERE expires_at > ?", now)
       .one() as { n: number };
     const alreadyKnown = this.sql
       .exec("SELECT COUNT(*) AS n FROM grants WHERE grant_id = ?", grantId)
@@ -475,7 +473,7 @@ export class HostDO extends DurableObject<Env> {
   }
 
   private grantRow(grantId: string):
-    | { grant_id: string; signed_payload: string; host_signature: string; expires_at: number; withdrawn_at: number | null }
+    | { grant_id: string; signed_payload: string; host_signature: string; expires_at: number }
     | undefined {
     const rows = this.sql.exec("SELECT * FROM grants WHERE grant_id = ?", grantId).toArray();
     return rows[0] as never;
@@ -489,33 +487,9 @@ export class HostDO extends DurableObject<Env> {
     return jsonResponse({
       grant: JSON.parse(row.signed_payload),
       signature: row.host_signature,
-      withdrawn: row.withdrawn_at !== null,
       host: h ? { hostname: h.hostname, ssh_port: h.ssh_port, ssh_user: h.ssh_user } : null,
       connected: this.ctx.getWebSockets().length > 0,
     });
-  }
-
-  private async withdrawGrant(request: Request, grantId: string): Promise<Response> {
-    const h = this.hostRow();
-    if (!h) return errorResponse(ERR.HOST_NOT_FOUND, "no such host");
-    const row = this.grantRow(grantId);
-    if (!row) return errorResponse(ERR.GRANT_NOT_FOUND, "no such grant");
-
-    // Withdrawal is host-signed too. Removing public metadata is not a security
-    // boundary — the host is authoritative — but an unauthenticated delete
-    // would be a free denial-of-service against a customer's own grants.
-    const body = (await request.json()) as Record<string, unknown>;
-    const grant = parseGrant(body.grant);
-    const signature = decodeSig(body.signature);
-    if (grant.grant_id !== grantId || grant.host_id !== h.host_id) {
-      return errorResponse(ERR.BAD_REQUEST, "withdrawal does not match this grant");
-    }
-    const identity = b64uDecode(h.identity_public_key);
-    if (!(await verifyEd25519(identity, canonicalGrant(grant), signature))) {
-      return errorResponse(ERR.BAD_SIGNATURE, "withdrawal signature does not verify");
-    }
-    this.sql.exec("UPDATE grants SET withdrawn_at = ? WHERE grant_id = ?", this.now(), grantId);
-    return jsonResponse({ grant_id: grantId, withdrawn: true });
   }
 
   // ------------------------------------------------------------- redemption
@@ -550,7 +524,6 @@ export class HostDO extends DurableObject<Env> {
 
     const row = this.grantRow(grantId);
     if (!row) return errorResponse(ERR.GRANT_NOT_FOUND, "no such grant");
-    if (row.withdrawn_at !== null) return errorResponse(ERR.GRANT_REVOKED, "grant was withdrawn");
     if (row.expires_at <= now) {
       // Advisory only; the host makes the authoritative expiry decision.
       return errorResponse(ERR.GRANT_EXPIRED, "grant has expired");

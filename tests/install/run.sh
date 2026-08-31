@@ -20,6 +20,9 @@ bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 dex()  { docker exec "$CONTAINER" "$@"; }
 dsh()  { docker exec "$CONTAINER" bash -c "$1"; }
+# As the enrolled owner. Running these as root fails, correctly: root is not in
+# the owner's group and cannot traverse the setgid socket directory.
+duser(){ docker exec -u ubuntu "$CONTAINER" sh -c "$1"; }
 
 cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -30,7 +33,7 @@ STAGE="$REPO/tests/install/stage"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 ( cd "$REPO/go"
   export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
-  for c in grantd grant-signer grantctl grant-agent; do
+  for c in grantd grant-signer; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" -o "$STAGE/$c" "./cmd/$c"
   done )
 ok "binaries built for linux/$ARCH"
@@ -140,20 +143,26 @@ if [ -n "$SIGNER_PID" ] && [ "$SIGNER_PID" != "0" ]; then
 fi
 
 step "end to end through the installed system"
-# No --socket flag: the binaries' defaults must match the layout the installer
-# creates, or every documented command is wrong on a real install.
-URL=$(dsh 'runuser -u ubuntu -- grantctl new --ttl 10m --url-only' 2>&1 | tr -d '[:space:]' || true)
+# Exactly the commands the installer prints, with no grantd client binary
+# involved: curl over the owner socket to mint, and install/redeem.sh — curl,
+# openssl, ssh-keygen — to redeem. If the documented path ever stops working,
+# this fails rather than the documentation quietly becoming wrong.
+URL=$(duser "curl -s --unix-socket /run/grantd/owner/owner.sock \
+             -X POST http://localhost/grants -H 'content-type: application/json' \
+             -d '{\"ttl_seconds\":600}' \
+           | sed -n 's/.*\"capability_url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p'" || true)
 case "$URL" in
-  http*) ok "ubuntu can mint a capability through the owner socket" ;;
-  *) bad "grantctl new failed: $URL" ;;
+  http*) ok "ubuntu can mint a capability with curl over the owner socket" ;;
+  *) bad "minting failed: $URL" ;;
 esac
 
 if [ -n "$URL" ]; then
   sleep 4
-  dsh "runuser -u ubuntu -- grant-agent redeem --identity /tmp/aid --out /tmp/visit $URL" >/tmp/redeem.log 2>&1 \
-    && ok "redeemed through the deployed coordination service" \
+  duser "GRANTD_IDENTITY=/tmp/visit/id.pem sh /opt/grantd-install/redeem.sh --out /tmp/visit '$URL'" \
+    >/tmp/redeem.log 2>&1 \
+    && ok "redeemed with curl, openssl and ssh-keygen only" \
     || { bad "redeem failed"; tail -5 /tmp/redeem.log; }
-  OUT=$(dsh 'ssh -i /tmp/visit/id_ed25519 -o CertificateFile=/tmp/visit/id_ed25519-cert.pub \
+  OUT=$(duser 'ssh -i /tmp/visit/id_ed25519 -o CertificateFile=/tmp/visit/id_ed25519-cert.pub \
         -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR ubuntu@127.0.0.1 whoami' 2>&1 | tr -d '[:space:]')
   [ "$OUT" = "ubuntu" ] && ok "SSH login with the issued certificate" || bad "ssh failed: $OUT"

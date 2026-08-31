@@ -102,17 +102,10 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 	// --- captured envelope cannot be resubmitted while it is still fresh.
 	if err := s.store.RememberNonce(ctx, "redeem", p.Nonce, nowSec, NonceRetention); err != nil {
 		if errors.Is(err, store.ErrNonceReplay) {
-			// An identical retry of a won redemption is legitimate (the response
-			// may have been lost), and is handled by the idempotent claim below.
-			// A replay with a *different* key is not, and the claim rejects it.
-			// Either way the nonce alone is not the decision.
-			if !s.isIdempotentRetry(ctx, p.GrantID, p.AgentID, keyFP) {
-				return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeReplayedNonce,
-					"nonce has already been used")
-			}
-		} else {
-			return protocol.RedemptionResponse{}, err
+			return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeReplayedNonce,
+				"nonce has already been used")
 		}
+		return protocol.RedemptionResponse{}, err
 	}
 
 	// --- The authoritative step: lock the grant, verify the proof inside the
@@ -132,7 +125,7 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeGrantExpired, "grant has expired")
 	case store.ClaimAlreadyRedeemed:
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeAlreadyRedeemed,
-			"grant was already redeemed by a different key")
+			"grant has already been redeemed")
 	case store.ClaimBadProof:
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeBadProof,
 			"redemption proof does not verify")
@@ -141,26 +134,9 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeInternal, "unknown claim status")
 	}
 
-	// --- A retry of a redemption we already answered returns the identical
-	// --- certificate, never a second one.
-	if claim.Retry && claim.StoredCert != "" {
-		return protocol.RedemptionResponse{
-			Hostname:       h.Hostname,
-			Port:           h.SSHPort,
-			User:           claim.SSHUser,
-			Certificate:    claim.StoredCert,
-			Serial:         claim.Serial,
-			KeyID:          sshcert.KeyID(p.GrantID, p.AgentID),
-			ValidBefore:    claim.ExpiresAt,
-			ValidBeforeStr: time.Unix(claim.ExpiresAt, 0).UTC().Format(time.RFC3339),
-		}, nil
-	}
-
-	serial := claim.Serial
-	if serial == 0 {
-		if serial, err = sshcert.NewSerial(); err != nil {
-			return protocol.RedemptionResponse{}, err
-		}
+	serial, err := sshcert.NewSerial()
+	if err != nil {
+		return protocol.RedemptionResponse{}, err
 	}
 
 	validFrom := now.Add(-sshcert.ClockSkewBackdate)
@@ -197,15 +173,4 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 		ValidBefore:    validTo.Unix(),
 		ValidBeforeStr: validTo.UTC().Format(time.RFC3339),
 	}, nil
-}
-
-// isIdempotentRetry reports whether a repeated nonce belongs to the exact
-// (grant, agent, key) triple that already won this grant. Only that case is
-// allowed to proceed past replay detection.
-func (s *Signer) isIdempotentRetry(ctx context.Context, grantID, agentID, keyFP string) bool {
-	v, err := s.store.GetGrantView(ctx, grantID)
-	if err != nil {
-		return false
-	}
-	return v.RedeemedAt != nil && v.RedeemedAgentID == agentID && v.RedeemedKeyFP == keyFP
 }

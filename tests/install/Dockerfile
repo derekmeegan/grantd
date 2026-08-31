@@ -10,7 +10,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       systemd systemd-sysv openssh-server openssh-client ca-certificates \
-      curl jq util-linux procps sudo dbus \
+      curl jq util-linux procps sudo dbus python3 coreutils \
  && rm -f /etc/apt/apt.conf.d/99grantd-bootstrap \
  && rm -rf /var/lib/apt/lists/*
 

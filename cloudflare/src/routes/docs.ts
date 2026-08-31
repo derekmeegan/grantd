@@ -37,7 +37,7 @@ if you paste it somewhere public.
     GET    /                                             this document
     GET    /health
 
-    POST   /v1/agent-challenges                          start Agent Captcha
+    POST   /v1/agent-challenges                          start registration
     POST   /v1/agents                                    register an agent identity
     GET    /v1/agents/:agent_id
 
@@ -46,7 +46,6 @@ if you paste it somewhere public.
     GET    /v1/hosts/:host_id/connect                    rendezvous WebSocket (host only)
     PUT    /v1/hosts/:host_id/grants/:grant_id           publish signed grant metadata
     GET    /v1/hosts/:host_id/grants/:grant_id
-    DELETE /v1/hosts/:host_id/grants/:grant_id           withdraw published metadata
     POST   /v1/hosts/:host_id/grants/:grant_id/redeem    redeem a capability
 
     GET    /g/:host_id/:grant_id                         redemption instructions
@@ -62,10 +61,13 @@ alphabet without padding.
 
     curl -sX POST ${origin}/v1/agent-challenges
 
-You receive a proof-of-work prefix, a difficulty in bits, and a short question.
-Find a nonce such that \`sha256(prefix_bytes || utf8(nonce))\` has at least that
-many leading zero bits, answer the question, and sign the registration message
-with your identity key. Being registered authorizes nothing on its own.
+You receive a proof-of-work prefix and a difficulty in bits. Find a nonce such
+that \`sha256(prefix_bytes || utf8(nonce))\` has at least that many leading zero
+bits, then sign the registration message with your identity key.
+
+Registration is required to redeem, and is an abuse control rather than a
+security boundary: it makes reaching a machine cost a second of CPU. It grants
+nothing by itself — authority comes only from a capability secret.
 
 ## Error codes
 
@@ -94,8 +96,8 @@ Redeem it like this.
 
      curl -sX POST ${origin}/v1/agent-challenges
 
-   Solve the returned proof of work and question, then POST the signed
-   registration to ${origin}/v1/agents
+   Solve the returned proof of work, then POST the signed registration to
+   ${origin}/v1/agents. Registration is required to redeem.
 
 2. Generate a throwaway SSH key. It must be ed25519, and it must never leave
    your machine.
@@ -143,12 +145,17 @@ Redeem it like this.
      ssh -i ./grantd-key -o CertificateFile=./grantd-key-cert.pub \\
        -p "$port" "$user@$hostname"
 
+If you would rather not implement the canonical encoding yourself, this does the
+whole flow with curl, openssl and ssh-keygen, and nothing else:
+
+  curl -sO ${origin}/redeem.sh && sh redeem.sh '<the full URL, including #secret>'
+
 Notes.
 
-  The grant is single-use. The first (agent, SSH key) pair to present a valid
-  proof wins; everyone else gets GRANT_ALREADY_REDEEMED. Retrying the identical
-  request returns the identical certificate, so a lost response is safe to
-  retry.
+  The grant is single-use, with no retry path. The first agent to present a
+  valid proof wins; everyone else gets GRANT_ALREADY_REDEEMED, and resubmitting
+  your own request is refused as a replayed nonce. If you lose the response, ask
+  for another URL — grants are free to mint.
 
   The certificate expires when the grant does. There is no renewal.
 

@@ -417,38 +417,35 @@ func TestGrantIsSingleUse(t *testing.T) {
 	}
 }
 
-func TestIdenticalRetryReturnsTheSameCertificate(t *testing.T) {
+// TestReplayingAWonRedemptionIsRejected pins the deliberate absence of an
+// idempotent-retry path. A grant is consumed exactly once, with no exception for
+// the agent that won it: resubmitting the identical envelope fails.
+//
+// The cost is that a lost response burns the grant. That is a real regression in
+// convenience, accepted knowingly — grants are free to mint, and the alternative
+// was a special case inside the one function where a mistake means two keys get
+// access.
+func TestReplayingAWonRedemptionIsRejected(t *testing.T) {
 	s := newSigner(t)
 	ctx := context.Background()
 	cap := mintCapability(t, s, 1800)
-	ident := newAgent(t)
-	key := newSSHKey(t)
 
-	req, err := agent.BuildRedemption(ident, cap, key.Line, time.Now())
+	req, err := agent.BuildRedemption(newAgent(t), cap, newSSHKey(t).Line, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := s.Redeem(ctx, req)
-	if err != nil {
+	if _, err := s.Redeem(ctx, req); err != nil {
 		t.Fatal(err)
 	}
-	// The response was "lost"; the agent retries the identical envelope.
-	second, err := s.Redeem(ctx, req)
-	if err != nil {
-		t.Fatalf("identical retry was rejected: %v", err)
-	}
-	if first.Certificate != second.Certificate {
-		t.Error("retry produced a different certificate")
-	}
-	if first.Serial != second.Serial {
-		t.Errorf("retry produced a different serial: %d vs %d", first.Serial, second.Serial)
+	if code := redeemErrCode(t, mustFail(s.Redeem(ctx, req))); code != protocol.ErrCodeReplayedNonce {
+		t.Errorf("code = %s, want REPLAYED_NONCE", code)
 	}
 	n, err := s.Store().CertificateCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Errorf("certificates issued = %d, want 1", n)
+		t.Errorf("certificates issued = %d, want exactly 1", n)
 	}
 }
 

@@ -63,7 +63,7 @@ mkdir -p "$STAGE"
 log "building $VERSION"
 COMMIT="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 for arch in amd64 arm64; do
-  for cmd in grantd grant-signer grantctl grant-agent; do
+  for cmd in grantd grant-signer; do
     # Reproducibility matters for a signed artifact: -trimpath removes local
     # paths, and CGO is off so there is nothing of the build host in the binary.
     ( cd "$REPO/go" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
@@ -71,7 +71,7 @@ for arch in amd64 arm64; do
           -o "$STAGE/${cmd}-linux-${arch}" "./cmd/$cmd" )
   done
 done
-log "built 8 artifacts"
+log "built 4 artifacts"
 
 # ------------------------------------------------------------------- hashes
 

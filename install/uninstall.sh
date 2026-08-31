@@ -95,7 +95,6 @@ fi
 log "removing files"
 rm -rf "$CONFDIR" "$STATEDIR" "$LIBDIR" "$TMPFILES" /run/grantd
 rm -f /etc/grantd.conf
-rm -f "$BINDIR/grantctl" "$BINDIR/grant-agent"
 
 if [ "$KEEP_USERS" -ne 1 ]; then
   log "removing service accounts"

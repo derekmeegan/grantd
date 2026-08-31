@@ -25,6 +25,23 @@ The coordination service is a router, not a trust root.
         sshd ◄──────────────── direct SSH, never proxied ─────────────┘
 ```
 
+## There is no client to install
+
+Two binaries run on a host. Neither side of a grant needs anything else.
+
+The owner mints a capability with curl over a Unix socket:
+
+```
+curl -s --unix-socket /run/grantd/owner/owner.sock \
+  -X POST http://localhost/grants \
+  -H 'content-type: application/json' -d '{"ttl_seconds":1800}'
+```
+
+The recipient redeems with curl, openssl and ssh-keygen. `install/redeem.sh` is
+a POSIX shell reference implementation that does the whole flow in about 250
+lines, and the test suite uses it rather than a Go client — so "no SDK required"
+is a property the tests would catch losing, not a claim in a README.
+
 ## What the service never receives
 
 | Stays on the customer machine | Stays with the visiting agent |
@@ -42,10 +59,11 @@ fragment, from the owner to the recipient, out of band.
 
 ```
 protocol/          frozen v1 spec and normative cross-language test vectors
-go/                grantd (daemon), grant-signer (trust root), grant-agent (visitor)
+go/                grantd (daemon), grant-signer (trust root)
 cloudflare/        Worker + Durable Objects: routing and rendezvous only
 install/           installer, uninstaller, systemd units
 tests/             end-to-end and adversarial suites
+web/               static landing page
 ```
 
 ## Reading order

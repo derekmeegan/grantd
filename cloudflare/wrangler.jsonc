@@ -7,6 +7,9 @@
   // agent signatures without shipping a crypto library.
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // The reference redeemer is served from the single copy in install/, so the
+  // script agents download is always the one the test suite exercises.
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"] }],
   "vars": {
     "PUBLIC_ORIGIN": ""
   },

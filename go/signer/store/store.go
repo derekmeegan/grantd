@@ -321,19 +321,15 @@ const (
 	ClaimNotFound
 	ClaimRevoked
 	ClaimExpired
-	ClaimAlreadyRedeemed // consumed by a different agent or key
+	ClaimAlreadyRedeemed // already consumed, by anyone
 	ClaimBadProof        // proof did not verify; grant deliberately not consumed
 )
 
-// ClaimResult reports what happened and, on an idempotent retry, hands back the
-// certificate that was already issued so the caller can return it verbatim.
+// ClaimResult reports what happened.
 type ClaimResult struct {
-	Status     ClaimStatus
-	SSHUser    string
-	ExpiresAt  int64
-	Retry      bool
-	Serial     uint64
-	StoredCert string
+	Status    ClaimStatus
+	SSHUser   string
+	ExpiresAt int64
 }
 
 // ClaimGrant performs the single atomic step that makes a grant single-use.
@@ -346,6 +342,14 @@ type ClaimResult struct {
 //   - Verifying inside the transaction means a caller who cannot produce a
 //     valid proof causes a ROLLBACK, so a flood of wrong guesses cannot burn a
 //     legitimate grant.
+//
+// A grant is consumed exactly once, with no exception for retries. An earlier
+// version re-issued the stored certificate when the same agent presented the
+// same key again, so that a lost response was recoverable. It was removed: it
+// was the subtlest code in the signer, it entangled the replay check with the
+// claim, and it bought a nicety. Grants are free to mint, so a lost response
+// costs one more capability rather than a special case in the one function
+// where a mistake means two keys get access.
 //
 // verify is called with the stored secret and must not retain it.
 func (s *Store) ClaimGrant(
@@ -399,12 +403,8 @@ func (s *Store) ClaimGrant(
 		return ClaimResult{Status: ClaimExpired}, nil
 	}
 
-	retry := false
 	if redeemedAt.Valid {
-		if redAgent.String != agentID || redKeyFP.String != keyFP {
-			return ClaimResult{Status: ClaimAlreadyRedeemed}, nil
-		}
-		retry = true
+		return ClaimResult{Status: ClaimAlreadyRedeemed}, nil
 	}
 
 	ok, err := verify(secret)
@@ -416,29 +416,14 @@ func (s *Store) ClaimGrant(
 		return ClaimResult{Status: ClaimBadProof}, nil
 	}
 
-	res := ClaimResult{Status: ClaimOK, SSHUser: sshUser, ExpiresAt: expiresAt, Retry: retry}
-
-	if retry {
-		var serial int64
-		var cert string
-		err := conn.QueryRowContext(ctx,
-			`SELECT serial, certificate FROM certificates WHERE grant_id = ?`, grantID).
-			Scan(&serial, &cert)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return ClaimResult{}, err
-		}
-		if err == nil {
-			res.Serial = uint64(serial)
-			res.StoredCert = cert
-		}
-	} else {
-		if _, err := conn.ExecContext(ctx, `
-            UPDATE grants SET redeemed_at = ?, redeemed_agent_id = ?, redeemed_key_fp = ?
-             WHERE id = ? AND redeemed_at IS NULL`,
-			now, agentID, keyFP, grantID); err != nil {
-			return ClaimResult{}, err
-		}
+	if _, err := conn.ExecContext(ctx, `
+        UPDATE grants SET redeemed_at = ?, redeemed_agent_id = ?, redeemed_key_fp = ?
+         WHERE id = ? AND redeemed_at IS NULL`,
+		now, agentID, keyFP, grantID); err != nil {
+		return ClaimResult{}, err
 	}
+
+	res := ClaimResult{Status: ClaimOK, SSHUser: sshUser, ExpiresAt: expiresAt}
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return ClaimResult{}, fmt.Errorf("store: commit: %w", err)

@@ -458,26 +458,20 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 	})
 
 	t.Run("replaying the exact captured envelope", func(t *testing.T) {
-		// Byte-identical replay is the one case that is allowed to succeed,
-		// because it is indistinguishable from the redeemer retrying a lost
-		// response — and it can only ever produce the same certificate for the
-		// same key.
+		// There is no idempotent-retry path, so even a byte-identical replay is
+		// refused. The nonce catches it before the grant is consulted.
 		cap := h.mint(t, 1800)
 		ident, key := newVisitor(t)
 		raw := envelopeFor(t, ident, cap, key.Line)
-		status, first := svc.redeem(t, raw)
-		if status != 200 {
+		if status, _ := svc.redeem(t, raw); status != 200 {
 			t.Fatalf("legitimate redemption failed with %d", status)
 		}
-		status, second := svc.redeem(t, raw)
-		if status != 200 {
-			t.Fatalf("identical retry was rejected with %d", status)
+		status, body := svc.redeem(t, raw)
+		if status == 200 {
+			t.Fatal("a replayed envelope produced a second certificate")
 		}
-		var a, b protocol.RedemptionResponse
-		_ = json.Unmarshal(first, &a)
-		_ = json.Unmarshal(second, &b)
-		if a.Certificate != b.Certificate || a.Serial != b.Serial {
-			t.Error("an identical retry produced a different certificate")
+		if code := errorCode(t, body); code != protocol.ErrCodeReplayedNonce {
+			t.Errorf("code = %s, want REPLAYED_NONCE", code)
 		}
 	})
 

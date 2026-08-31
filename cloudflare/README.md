@@ -6,7 +6,7 @@ Routing and rendezvous. Not a trust root.
 Worker (router)
   ├── HostDO(host_id)        public record, published grant metadata, hibernating WebSocket
   ├── AgentDO(agent_id)      public key, nothing else
-  └── ChallengeDO(id)        one Agent Captcha challenge, consumed once
+  └── ChallengeDO(id)        one registration proof-of-work challenge, consumed once
 ```
 
 No D1. There is very little global relational state in V1, and what there is
@@ -48,7 +48,7 @@ Keep the rendezvous path out of aggressive bot rules: it is a long-lived
 WebSocket from a server, which is exactly the shape a bot heuristic dislikes.
 
 **2. Workers rate limiting bindings, keyed by IP** — `CHALLENGE_LIMITER`,
-`REGISTRATION_LIMITER`, `REDEMPTION_LIMITER`. These pair with the captcha's
+`REGISTRATION_LIMITER`, `REDEMPTION_LIMITER`. These pair with the registration
 proof of work so that mass registration is expensive in two dimensions rather
 than one.
 
@@ -98,3 +98,13 @@ these directly, with a deliberately malicious service:
   transaction on the customer's machine.
 * It cannot ask a host to do anything else — the rendezvous frame vocabulary is
   fixed, and there is no frame that carries a command, a path, or a filename.
+
+## Registration is required, and is not a security boundary
+
+An unregistered `agent_id` is refused with `AGENT_NOT_FOUND`, before the request
+reaches the customer's machine, so reaching a host at all costs a proof of work.
+
+It cannot be more than an abuse control, and the reason is structural: the
+signer decides everything, and it has no network and no registry to consult. It
+therefore cannot check registration, and a compromised coordination service
+could skip the check. Nothing in the security argument rests on it.
