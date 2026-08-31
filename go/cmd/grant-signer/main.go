@@ -29,10 +29,11 @@ import (
 )
 
 const (
-	defaultKeyDir     = "/etc/grantd"
-	defaultStatePath  = "/var/lib/grant-signer/state.db"
-	defaultOwnerSock  = "/run/grantd/owner.sock"
-	defaultDaemonSock = "/run/grantd/redeem.sock"
+	defaultKeyDir    = "/etc/grantd"
+	defaultStatePath = "/var/lib/grant-signer/state.db"
+	// Each socket lives in its own setgid directory; see install/install.sh.
+	defaultOwnerSock  = "/run/grantd/owner/owner.sock"
+	defaultDaemonSock = "/run/grantd/redeem/redeem.sock"
 )
 
 func main() {

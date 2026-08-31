@@ -1,0 +1,53 @@
+[Unit]
+Description=grantd daemon (coordination rendezvous)
+Documentation=https://github.com/derekmeegan/grantd
+After=network-online.target grant-signer.service
+Wants=network-online.target
+Requires=grant-signer.service
+
+[Service]
+Type=simple
+User=grantd
+Group=grantd
+
+# The origin lives in a public file, not in /etc/grantd. That directory holds
+# both private keys and is made invisible to this process below, so anything the
+# daemon needs to read has to live outside it.
+ExecStart=/usr/local/lib/grantd/grantd \
+    --signer-sock /run/grantd/redeem/redeem.sock \
+    --origin-file /etc/grantd.conf
+
+Restart=always
+RestartSec=2
+
+# This is the process the threat model assumes gets compromised. It needs
+# outbound TCP and one Unix socket, and nothing else — so it is given nothing
+# else. In particular /etc/grantd, which holds both private keys, is made
+# invisible to it, on top of the file permissions that already exclude it.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+InaccessiblePaths=/etc/grantd /var/lib/grant-signer /run/grantd/owner
+ReadWritePaths=/run/grantd/redeem
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

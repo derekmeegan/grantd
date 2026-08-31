@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	defaultDaemonSock = "/run/grantd/redeem.sock"
-	defaultConfigFile = "/etc/grantd/origin"
+	defaultDaemonSock = "/run/grantd/redeem/redeem.sock"
+	// Public config, deliberately outside /etc/grantd: the daemon's systemd unit
+	// makes that directory invisible to it, because it holds both private keys.
+	defaultConfigFile = "/etc/grantd.conf"
 )
 
 func main() {

@@ -69,33 +69,40 @@ func Listen(path string, mode os.FileMode, uid, gid int) (net.Listener, error) {
 	return &namedListener{Listener: ln, path: path}, nil
 }
 
-// ensureOwnership makes the socket owned by the requested uid/gid, by whichever
-// route is available.
+// ensureOwnership makes sure the socket has the requested uid/gid, preferring
+// to verify rather than to change.
 //
-// The signer runs unprivileged, so chown usually fails. The supported
-// deployment puts each socket in a setgid directory, which makes the kernel
-// assign the right group at creation with no privilege at all. Either route is
-// fine; what is not fine is proceeding with the wrong owner, because socket
-// ownership is the mechanism that keeps the daemon off the owner socket.
+// The ordering matters more than it looks. The supported deployment puts each
+// socket in a setgid directory, so the kernel already assigns the right group at
+// creation and no chown is needed. Checking first means the common path never
+// calls chown at all — which lets the signer's systemd unit deny @privileged
+// outright.
+//
+// That is not a cosmetic difference. A denied syscall under seccomp raises
+// SIGSYS and kills the process; it does not return EPERM. So a "try chown, fall
+// back on failure" design does not degrade gracefully under a syscall filter,
+// it dies. Checking first avoids the syscall instead of handling its failure.
 func ensureOwnership(path string, uid, gid int) error {
 	if uid < 0 && gid < 0 {
-		return nil
-	}
-	chownErr := os.Chown(path, uid, gid)
-	if chownErr == nil {
 		return nil
 	}
 	var st syscall.Stat_t
 	if err := syscall.Stat(path, &st); err != nil {
 		return fmt.Errorf("api: stat %s: %w", path, err)
 	}
-	if uid >= 0 && int(st.Uid) != uid {
-		return fmt.Errorf("api: %s is owned by uid %d, want %d, and chown failed: %w",
-			path, st.Uid, uid, chownErr)
+	uidOK := uid < 0 || int(st.Uid) == uid
+	gidOK := gid < 0 || int(st.Gid) == gid
+	if uidOK && gidOK {
+		return nil
 	}
-	if gid >= 0 && int(st.Gid) != gid {
-		return fmt.Errorf("api: %s has group %d, want %d, and chown failed "+
-			"(is its directory setgid to that group?): %w", path, st.Gid, gid, chownErr)
+
+	// Ownership is wrong, so the deployment is not the supported one. Try to
+	// correct it; if the syscall is unavailable this process is about to die,
+	// which is the right outcome — serving a socket with the wrong owner would
+	// silently remove the boundary between the daemon and the owner API.
+	if err := os.Chown(path, uid, gid); err != nil {
+		return fmt.Errorf("api: %s has owner %d:%d, want %d:%d, and chown failed "+
+			"(is its directory setgid to that group?): %w", path, st.Uid, st.Gid, uid, gid, err)
 	}
 	return nil
 }

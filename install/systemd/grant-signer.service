@@ -1,0 +1,67 @@
+[Unit]
+Description=grantd signer (local trust root)
+Documentation=https://github.com/derekmeegan/grantd
+After=local-fs.target
+Before=grantd.service
+
+[Service]
+Type=simple
+User=grantsigner
+Group=grantsigner
+
+# The socket directories are setgid so that the unprivileged signer ends up with
+# owner.sock in the owner's group and redeem.sock in the daemon's, without
+# needing CAP_CHOWN or membership in either group. The + prefix runs this one
+# step as root.
+ExecStartPre=+/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/grantd.conf
+ExecStart=/usr/local/lib/grantd/grant-signer serve \
+    --owner-sock /run/grantd/owner/owner.sock \
+    --daemon-sock /run/grantd/redeem/redeem.sock \
+    --owner-uid ${GRANTD_OWNER_UID} \
+    --owner-gid ${GRANTD_OWNER_GID} \
+    --daemon-uid ${GRANTD_DAEMON_UID} \
+    --daemon-gid ${GRANTD_DAEMON_GID}
+EnvironmentFile=/etc/grantd/signer.env
+
+Restart=always
+RestartSec=2
+
+# This process holds the SSH CA key and the host identity key. It has no reason
+# to ever touch the network, so it is placed in a namespace where it cannot:
+# PrivateNetwork leaves it with loopback only, and AF_UNIX is the only address
+# family it can even open. Unix sockets are filesystem objects and keep working.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/grant-signer /run/grantd
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# @privileged stays denied. The signer never needs to chown anything: the socket
+# directories are setgid, so the kernel assigns the right group at creation, and
+# the signer verifies that rather than changing it. A denied syscall under
+# seccomp raises SIGSYS and kills the process rather than returning an error, so
+# "deny it and let the code fall back" is not an option — the code has to not
+# make the call.
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

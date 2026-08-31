@@ -19,7 +19,11 @@ import (
 	"time"
 )
 
-const defaultOwnerSock = "/run/grantd/owner.sock"
+// Matches the layout install.sh creates. Each socket sits in its own setgid
+// directory so the kernel assigns the right group at creation; the directory is
+// also what gates traversal, which is why the path has a level the socket name
+// alone would not need.
+const defaultOwnerSock = "/run/grantd/owner/owner.sock"
 
 func main() {
 	if len(os.Args) < 2 {
