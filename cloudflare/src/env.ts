@@ -31,4 +31,7 @@ export interface Env {
 
   /** Public origin used in generated instructions, e.g. https://grantd.example.workers.dev */
   PUBLIC_ORIGIN?: string;
+
+  /** Proof-of-work difficulty. Lowered in tests; production uses the default. */
+  POW_DIFFICULTY_BITS?: string;
 }

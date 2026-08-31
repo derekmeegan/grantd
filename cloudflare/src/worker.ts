@@ -93,7 +93,6 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
     const reg = (body as Record<string, unknown>).registration as Record<string, unknown> | undefined;
     const challengeId = typeof reg?.challenge_id === "string" ? reg.challenge_id : "";
     const agentId = typeof reg?.agent_id === "string" ? reg.agent_id : "";
-    const answer = typeof reg?.answer === "string" ? reg.answer : "";
     const powNonce = typeof reg?.pow_nonce === "string" ? reg.pow_nonce : "";
     if (!AGENT_ID_RE.test(agentId)) {
       return errorResponse(ERR.BAD_REQUEST, "malformed agent_id");
@@ -109,7 +108,7 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
     const consumed = await chStub.fetch(
       new Request(`https://do/challenge/${challengeId}/consume`, {
         method: "POST",
-        body: JSON.stringify({ answer, pow_nonce: powNonce }),
+        body: JSON.stringify({ pow_nonce: powNonce }),
         headers: { "content-type": "application/json" },
       }),
     );

@@ -26,7 +26,6 @@ export const MIN_GRANT_TTL = 60;
 
 export const MAX_REQUEST_BYTES = 16 * 1024;
 export const MAX_SSH_PUBKEY_BYTES = 1024;
-export const MAX_ANSWER_BYTES = 256;
 export const MAX_POW_NONCE_BYTES = 64;
 export const MAX_HOSTNAME_BYTES = 253;
 export const MAX_USERNAME_BYTES = 32;
@@ -269,7 +268,6 @@ export interface AgentRegistration {
   agent_id: string;
   public_key: Uint8Array;
   challenge_id: string;
-  answer: string;
   pow_nonce: string;
   timestamp: bigint;
 }
@@ -281,7 +279,6 @@ export function parseAgentRegistration(raw: unknown): AgentRegistration {
     agent_id: str(o, "agent_id", 64),
     public_key: bytes(o, "public_key", 32),
     challenge_id: str(o, "challenge_id", 64),
-    answer: str(o, "answer", MAX_ANSWER_BYTES),
     pow_nonce: str(o, "pow_nonce", MAX_POW_NONCE_BYTES),
     timestamp: int(o, "timestamp"),
   };
@@ -296,7 +293,6 @@ export const canonicalAgentRegistration = (m: AgentRegistration): Uint8Array =>
     S("agent_id", m.agent_id),
     B("public_key", m.public_key),
     S("challenge_id", m.challenge_id),
-    S("answer", m.answer),
     S("pow_nonce", m.pow_nonce),
     U("timestamp", m.timestamp),
   ]);

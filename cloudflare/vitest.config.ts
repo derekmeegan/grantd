@@ -7,6 +7,9 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         compatibilityFlags: ["nodejs_compat"],
+        // A real second of CPU per registration is the point in production and
+        // pure waste in a test suite that registers dozens of agents.
+        bindings: { POW_DIFFICULTY_BITS: "8" },
       },
     }),
   ],

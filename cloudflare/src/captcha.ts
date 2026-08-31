@@ -1,103 +1,24 @@
 /**
- * Agent Captcha — admission control for self-service agent registration.
+ * Agent admission control.
  *
- * Two halves, with different jobs:
+ * This is a proof of work and nothing else. An earlier version also asked a
+ * natural-language question, on the theory that it demonstrated liveness and
+ * instruction-following. It was removed, because it was theater: the reference
+ * solver shipped in this repository and handled every template, nothing ever
+ * acted on the signal, and it cost a round trip and a template generator to
+ * produce a number nobody read.
  *
- *   - Proof of work is the cost function. It is what makes a million
- *     registrations expensive and one registration free.
- *   - The question is a liveness and instruction-following check. It is
- *     trivial for anything that can read English and annoying for a scraper
- *     that only replays HTTP.
+ * What remains has a narrow, honest job. `/v1/agent-challenges` and
+ * `/v1/agents` are unauthenticated endpoints that allocate Durable Objects, so
+ * without a cost function anyone can make the service allocate without bound.
+ * Twenty bits is about a second of CPU: free for one agent, expensive for a
+ * million. It protects the bill, not the customer's machine.
  *
- * Neither half is a security boundary, and the protocol does not treat them as
- * one. A registered agent identity authorizes nothing: access still requires
- * possession of a grant secret that this service never sees. The point of this
- * file is to keep the public API from being free to abuse, not to keep anyone
- * out of a customer's machine.
+ * Registration is likewise an abuse control, not a security boundary — see
+ * protocol/v1.md §11. It cannot be anything else in this architecture: the
+ * signer is the only party whose opinion authorizes access, and it has no
+ * network and no registry to consult.
  */
-
-export interface ChallengeSpec {
-  question: string;
-  answer: string;
-}
-
-const WORDS = [
-  "amber", "beacon", "cedar", "delta", "ember", "fjord", "gable", "harbor",
-  "ivory", "jasper", "kelp", "lantern", "marble", "nimbus", "onyx", "pewter",
-  "quarry", "ridge", "slate", "timber", "umber", "vellum", "willow", "zephyr",
-];
-
-const LETTER_WORDS = [
-  "strawberry", "possession", "bookkeeper", "millennium", "committee",
-  "assessment", "successful", "parallel", "occurrence", "necessary",
-];
-
-function pick<T>(arr: readonly T[], rng: () => number): T {
-  return arr[Math.floor(rng() * arr.length)];
-}
-
-function randomInt(rng: () => number, min: number, max: number): number {
-  return min + Math.floor(rng() * (max - min + 1));
-}
-
-function countLetter(word: string, letter: string): number {
-  let n = 0;
-  for (const c of word) if (c === letter) n++;
-  return n;
-}
-
-/**
- * Generates one challenge. The formats are rigid on purpose: the reference
- * solver shipped with the agent CLI has to be able to answer them unattended so
- * that CI can exercise the whole flow without a human or a model in the loop.
- */
-export function generateChallenge(rng: () => number = Math.random): ChallengeSpec {
-  switch (randomInt(rng, 0, 3)) {
-    case 0: {
-      const a = randomInt(rng, 20, 99);
-      const b = randomInt(rng, 1, 19);
-      const c = randomInt(rng, 1, 19);
-      return {
-        question: `Compute: ${a} + ${b} - ${c}. Reply with only the resulting number.`,
-        answer: String(a + b - c),
-      };
-    }
-    case 1: {
-      const chosen = new Set<string>();
-      while (chosen.size < 4) chosen.add(pick(WORDS, rng));
-      const words = [...chosen];
-      const sorted = [...words].sort();
-      return {
-        question: `Sort these words alphabetically: ${words.join(", ")}. Reply with only the third word.`,
-        answer: sorted[2],
-      };
-    }
-    case 2: {
-      const word = pick(LETTER_WORDS, rng);
-      const letters = [...new Set(word.split(""))].filter((c) => countLetter(word, c) > 1);
-      const letter = letters.length > 0 ? pick(letters, rng) : word[0];
-      return {
-        question: `Reply with only the number of times the letter "${letter}" appears in "${word}".`,
-        answer: String(countLetter(word, letter)),
-      };
-    }
-    default: {
-      const chosen = new Set<string>();
-      while (chosen.size < 5) chosen.add(pick(WORDS, rng));
-      const words = [...chosen];
-      const n = randomInt(rng, 1, 5);
-      return {
-        question: `Given the list: ${words.join(", ")}. Reply with only word number ${n}, counting from 1.`,
-        answer: words[n - 1],
-      };
-    }
-  }
-}
-
-/** Answers are compared case-insensitively after trimming. */
-export function answerMatches(expected: string, given: string): boolean {
-  return expected.trim().toLowerCase() === given.trim().toLowerCase();
-}
 
 /** Leading zero bits of a digest, used to score proof of work. */
 export function leadingZeroBits(digest: Uint8Array): number {

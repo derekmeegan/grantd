@@ -117,7 +117,6 @@ function canonicalFor(v: Vector): Uint8Array {
         agent_id: s(m.agent_id),
         public_key: b(m.public_key),
         challenge_id: s(m.challenge_id),
-        answer: s(m.answer),
         pow_nonce: s(m.pow_nonce),
         timestamp: n(m.timestamp),
       });

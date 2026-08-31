@@ -211,7 +211,6 @@ type AgentRegistration struct {
 	AgentID     string `json:"agent_id"`
 	PublicKey   []byte `json:"public_key"`
 	ChallengeID string `json:"challenge_id"`
-	Answer      string `json:"answer"`
 	PowNonce    string `json:"pow_nonce"`
 	Timestamp   int64  `json:"timestamp"`
 }
@@ -226,7 +225,6 @@ func (m *AgentRegistration) Canonical() ([]byte, error) {
 		canonical.S("agent_id", m.AgentID),
 		canonical.B("public_key", m.PublicKey),
 		canonical.S("challenge_id", m.ChallengeID),
-		canonical.S("answer", m.Answer),
 		canonical.S("pow_nonce", m.PowNonce),
 		canonical.U("timestamp", ts),
 	})
@@ -395,7 +393,6 @@ type agentRegistrationJSON struct {
 	AgentID     string `json:"agent_id"`
 	PublicKey   string `json:"public_key"`
 	ChallengeID string `json:"challenge_id"`
-	Answer      string `json:"answer"`
 	PowNonce    string `json:"pow_nonce"`
 	Timestamp   int64  `json:"timestamp"`
 }
@@ -403,7 +400,7 @@ type agentRegistrationJSON struct {
 func (m AgentRegistration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(agentRegistrationJSON{
 		Version: m.Version, AgentID: m.AgentID, PublicKey: b64enc(m.PublicKey),
-		ChallengeID: m.ChallengeID, Answer: m.Answer, PowNonce: m.PowNonce,
+		ChallengeID: m.ChallengeID, PowNonce: m.PowNonce,
 		Timestamp: m.Timestamp,
 	})
 }
@@ -419,7 +416,7 @@ func (m *AgentRegistration) UnmarshalJSON(data []byte) error {
 	}
 	*m = AgentRegistration{
 		Version: j.Version, AgentID: j.AgentID, PublicKey: pk,
-		ChallengeID: j.ChallengeID, Answer: j.Answer, PowNonce: j.PowNonce,
+		ChallengeID: j.ChallengeID, PowNonce: j.PowNonce,
 		Timestamp: j.Timestamp,
 	}
 	return nil

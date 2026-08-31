@@ -10,7 +10,6 @@ import (
 const (
 	MaxRequestBytes   = 16 * 1024
 	MaxSSHPubKeyBytes = 1024
-	MaxAnswerBytes    = 256
 	MaxPowNonceBytes  = 64
 	MaxHostnameBytes  = 253
 	MaxUsernameBytes  = 32
@@ -156,7 +155,7 @@ func (r *AgentRegisterRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// PowSpec is the proof-of-work half of an Agent Captcha challenge.
+// PowSpec is the proof-of-work challenge an agent must solve to register.
 type PowSpec struct {
 	Prefix         string `json:"prefix"`
 	DifficultyBits int    `json:"difficulty_bits"`
@@ -168,7 +167,6 @@ type Challenge struct {
 	Version     uint64  `json:"version"`
 	ExpiresAt   int64   `json:"expires_at"`
 	Pow         PowSpec `json:"pow"`
-	Question    string  `json:"question"`
 }
 
 // APIError is the uniform error envelope. Code is one of the constants in

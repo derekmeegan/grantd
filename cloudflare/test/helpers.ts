@@ -7,7 +7,8 @@
  */
 
 import { SELF } from "cloudflare:test";
-import { b64uEncode } from "../src/crypto/encoding";
+import { b64uDecode, b64uEncode } from "../src/crypto/encoding";
+import { leadingZeroBits } from "../src/captcha";
 import { agentId as deriveAgentId, hostId as deriveHostId } from "../src/crypto/ids";
 import {
   canonicalAgentRegistration,
@@ -180,6 +181,22 @@ export class TestHost {
   }
 }
 
+/** Finds a nonce whose SHA-256 with the prefix has enough leading zero bits. */
+export async function solvePow(prefixB64: string, difficultyBits: number): Promise<string> {
+  const prefix = b64uDecode(prefixB64);
+  const enc = new TextEncoder();
+  for (let i = 0; i < 1 << 26; i++) {
+    const nonce = String(i);
+    const nb = enc.encode(nonce);
+    const buf = new Uint8Array(prefix.length + nb.length);
+    buf.set(prefix, 0);
+    buf.set(nb, prefix.length);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf as BufferSource));
+    if (leadingZeroBits(digest) >= difficultyBits) return nonce;
+  }
+  throw new Error("could not solve the proof of work");
+}
+
 // ------------------------------------------------------------------ agent
 
 export class TestAgent {
@@ -193,6 +210,14 @@ export class TestAgent {
     const identity = await newIdentity();
     const sshKey = await newIdentity();
     return new TestAgent(identity, await deriveAgentId(identity.publicKey), sshKey);
+  }
+
+  /** An agent that has completed registration, as a real redeemer must have. */
+  static async registered(): Promise<TestAgent> {
+    const a = await TestAgent.create();
+    const res = await a.register();
+    if (!res.ok) throw new Error(`registration failed: ${res.status} ${await res.text()}`);
+    return a;
   }
 
   get sshPublicKeyLine(): string {
@@ -242,13 +267,32 @@ export class TestAgent {
     };
   }
 
-  async registrationBody(challengeId: string, answer: string, powNonce: string): Promise<unknown> {
+  /**
+   * Registers this identity for real: fetches a challenge, solves the proof of
+   * work, and posts a signed registration. Redemption requires it, so tests
+   * that exercise the happy path have to do what a real agent does.
+   */
+  async register(): Promise<Response> {
+    const chRes = await SELF.fetch(`${ORIGIN}/v1/agent-challenges`, { method: "POST" });
+    if (!chRes.ok) throw new Error(`challenge failed: ${chRes.status}`);
+    const ch = (await chRes.json()) as {
+      challenge_id: string;
+      pow: { prefix: string; difficulty_bits: number };
+    };
+    const nonce = await solvePow(ch.pow.prefix, ch.pow.difficulty_bits);
+    return await SELF.fetch(`${ORIGIN}/v1/agents`, {
+      method: "POST",
+      body: JSON.stringify(await this.registrationBody(ch.challenge_id, nonce)),
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  async registrationBody(challengeId: string, powNonce: string): Promise<unknown> {
     const reg = {
       version: 1n,
       agent_id: this.agentId,
       public_key: this.identity.publicKey,
       challenge_id: challengeId,
-      answer,
       pow_nonce: powNonce,
       timestamp: BigInt(now()),
     };
@@ -259,7 +303,6 @@ export class TestAgent {
         agent_id: reg.agent_id,
         public_key: b64uEncode(reg.public_key),
         challenge_id: reg.challenge_id,
-        answer: reg.answer,
         pow_nonce: reg.pow_nonce,
         timestamp: Number(reg.timestamp),
       },

@@ -10,19 +10,21 @@
 import { DurableObject } from "cloudflare:workers";
 import { ERR, errorResponse, jsonResponse } from "../errors";
 import { b64uEncode } from "../crypto/encoding";
-import { answerMatches, generateChallenge, verifyPow } from "../captcha";
+import { verifyPow } from "../captcha";
 import type { Env } from "../env";
 
 /** Challenges are short-lived; a stale one is a replay opportunity, not a convenience. */
 const TTL_SECONDS = 600;
 
-/** ~1M hashes: a second for one agent, real money for a million registrations. */
-const DIFFICULTY_BITS = 20;
+/**
+ * ~1M hashes: about a second for one agent, real money for a million
+ * registrations. Overridable so that tests are not forced to spend a CPU-second
+ * per agent to exercise a flow whose cost is the entire point.
+ */
+const DEFAULT_DIFFICULTY_BITS = 20;
 
 interface State {
   challenge_id: string;
-  question: string;
-  answer: string;
   pow_prefix: string;
   difficulty_bits: number;
   created_at: number;
@@ -31,6 +33,13 @@ interface State {
 }
 
 export class ChallengeDO extends DurableObject<Env> {
+  private difficultyBits(): number {
+    const raw = this.env.POW_DIFFICULTY_BITS;
+    if (!raw) return DEFAULT_DIFFICULTY_BITS;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 0 && n <= 32 ? n : DEFAULT_DIFFICULTY_BITS;
+  }
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const rest = url.pathname.split("/").filter(Boolean).slice(2);
@@ -45,17 +54,14 @@ export class ChallengeDO extends DurableObject<Env> {
   }
 
   private async create(challengeId: string): Promise<Response> {
-    const spec = generateChallenge();
     const prefix = new Uint8Array(16);
     crypto.getRandomValues(prefix);
     const now = Math.floor(Date.now() / 1000);
 
     const state: State = {
       challenge_id: challengeId,
-      question: spec.question,
-      answer: spec.answer,
       pow_prefix: b64uEncode(prefix),
-      difficulty_bits: DIFFICULTY_BITS,
+      difficulty_bits: this.difficultyBits(),
       created_at: now,
       expires_at: now + TTL_SECONDS,
       consumed_at: null,
@@ -67,14 +73,12 @@ export class ChallengeDO extends DurableObject<Env> {
 
     console.log(JSON.stringify({ event: "agent.challenge_created", challenge_id: challengeId }));
 
-    // The expected answer is deliberately not in this response.
     return jsonResponse(
       {
         challenge_id: challengeId,
         version: 1,
         expires_at: state.expires_at,
         pow: { prefix: state.pow_prefix, difficulty_bits: state.difficulty_bits },
-        question: state.question,
       },
       201,
     );
@@ -86,8 +90,7 @@ export class ChallengeDO extends DurableObject<Env> {
    * an unconsumed challenge.
    */
   private async consume(request: Request): Promise<Response> {
-    const body = (await request.json()) as { answer?: unknown; pow_nonce?: unknown };
-    const answer = typeof body.answer === "string" ? body.answer : "";
+    const body = (await request.json()) as { pow_nonce?: unknown };
     const powNonce = typeof body.pow_nonce === "string" ? body.pow_nonce : "";
 
     return await this.ctx.blockConcurrencyWhile(async () => {
@@ -105,9 +108,6 @@ export class ChallengeDO extends DurableObject<Env> {
       const prefix = decodePrefix(state.pow_prefix);
       if (!(await verifyPow(prefix, state.difficulty_bits, powNonce))) {
         return errorResponse(ERR.BAD_ANSWER, "proof of work is invalid");
-      }
-      if (!answerMatches(state.answer, answer)) {
-        return errorResponse(ERR.BAD_ANSWER, "challenge answer is incorrect");
       }
 
       state.consumed_at = now;

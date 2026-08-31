@@ -88,7 +88,6 @@ func cmdRegister(args []string) error {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
 	origin := fs.String("origin", os.Getenv("GRANTD_ORIGIN"), "coordination service origin")
 	identity := fs.String("identity", defaultIdentityPath(), "path to the agent identity key")
-	answer := fs.String("answer", "", "answer the captcha question yourself instead of using the reference solver")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -100,12 +99,7 @@ func cmdRegister(args []string) error {
 		return err
 	}
 	client := agent.NewClient(*origin)
-
-	answerFn := agent.AnswerFunc(agent.ReferenceAnswer)
-	if *answer != "" {
-		answerFn = func(string) (string, error) { return *answer, nil }
-	}
-	if err := client.Register(context.Background(), ident, answerFn); err != nil {
+	if err := client.Register(context.Background(), ident); err != nil {
 		return err
 	}
 	fmt.Printf("registered %s at %s\n", ident.ID, *origin)
@@ -142,7 +136,7 @@ func cmdRedeem(args []string, connect bool) error {
 		// Registration is idempotent and cheap to retry; doing it unconditionally
 		// on first use means an agent that has never seen this service still
 		// works from a single command.
-		if err := client.EnsureRegistered(ctx, ident, agent.ReferenceAnswer); err != nil {
+		if err := client.EnsureRegistered(ctx, ident); err != nil {
 			return err
 		}
 	}

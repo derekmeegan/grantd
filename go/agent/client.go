@@ -77,10 +77,6 @@ func truncate(b []byte, n int) string {
 	return string(b[:n]) + "..."
 }
 
-// AnswerFunc answers an Agent Captcha question. In production this is the
-// agent's own model reading the question; in CI it is the reference solver.
-type AnswerFunc func(question string) (string, error)
-
 // AgentExists reports whether the service already knows this identity, so that
 // a repeat visit does not pay for a proof of work it does not need.
 func (c *Client) AgentExists(ctx context.Context, agentID string) (bool, error) {
@@ -95,8 +91,9 @@ func (c *Client) AgentExists(ctx context.Context, agentID string) (bool, error) 
 	return false, err
 }
 
-// EnsureRegistered registers the identity if the service does not know it yet.
-func (c *Client) EnsureRegistered(ctx context.Context, ident *Identity, answer AnswerFunc) error {
+// EnsureRegistered registers the identity if the service does not know it yet,
+// so a repeat visit does not pay for a proof of work it does not need.
+func (c *Client) EnsureRegistered(ctx context.Context, ident *Identity) error {
 	known, err := c.AgentExists(ctx, ident.ID)
 	if err != nil {
 		return err
@@ -104,12 +101,17 @@ func (c *Client) EnsureRegistered(ctx context.Context, ident *Identity, answer A
 	if known {
 		return nil
 	}
-	return c.Register(ctx, ident, answer)
+	return c.Register(ctx, ident)
 }
 
-// Register performs the full Agent Captcha flow and enrolls the identity's
-// public key.
-func (c *Client) Register(ctx context.Context, ident *Identity, answer AnswerFunc) error {
+// Register solves the admission proof of work and enrolls the identity's public
+// key.
+//
+// Registration is required to redeem, but it is an abuse control rather than a
+// security boundary: the signer has no network and no registry, so it cannot
+// check it, and a compromised coordination service could skip it. What it buys
+// is that reaching a customer's machine at all costs a second of CPU.
+func (c *Client) Register(ctx context.Context, ident *Identity) error {
 	var ch protocol.Challenge
 	if err := c.do(ctx, http.MethodPost, "/v1/agent-challenges", map[string]any{}, &ch); err != nil {
 		return err
@@ -122,17 +124,12 @@ func (c *Client) Register(ctx context.Context, ident *Identity, answer AnswerFun
 	if err != nil {
 		return err
 	}
-	ans, err := answer(ch.Question)
-	if err != nil {
-		return err
-	}
 
 	reg := protocol.AgentRegistration{
 		Version:     protocol.Version,
 		AgentID:     ident.ID,
 		PublicKey:   ident.PublicKey(),
 		ChallengeID: ch.ChallengeID,
-		Answer:      ans,
 		PowNonce:    powNonce,
 		Timestamp:   time.Now().Unix(),
 	}

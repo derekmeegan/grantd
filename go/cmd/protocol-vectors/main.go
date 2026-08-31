@@ -138,7 +138,7 @@ func main() {
 
 	areg := protocol.AgentRegistration{
 		Version: 1, AgentID: agentID, PublicKey: agentPub,
-		ChallengeID: "c_0123456789abcdef", Answer: "42", PowNonce: "31337",
+		ChallengeID: "c_0123456789abcdef", PowNonce: "31337",
 		Timestamp: 1756598400,
 	}
 	b.Vectors = append(b.Vectors, signed("agent_registration", protocol.CtxAgentRegister, areg,

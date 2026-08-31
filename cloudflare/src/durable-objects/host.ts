@@ -556,6 +556,21 @@ export class HostDO extends DurableObject<Env> {
       return errorResponse(ERR.GRANT_EXPIRED, "grant has expired");
     }
 
+    // The agent must be registered.
+    //
+    // This is an abuse control, not a security boundary, and the distinction is
+    // structural rather than a matter of degree: the signer is the only party
+    // whose opinion authorizes access, and it has no network and no registry to
+    // consult, so it cannot enforce this and a compromised coordination service
+    // could skip it. What the check does buy is that reaching a customer's
+    // machine at all costs a proof of work, which is what makes the per-agent
+    // limiter and the audit trail mean something.
+    const known = await this.env.AGENTS.get(this.env.AGENTS.idFromName(payload.agent_id))
+      .fetch(new Request(`https://do/agent/${payload.agent_id}`, { method: "GET" }));
+    if (!known.ok) {
+      return errorResponse(ERR.AGENT_NOT_FOUND, "register an agent identity before redeeming");
+    }
+
     const sockets = this.ctx.getWebSockets();
     if (sockets.length === 0) {
       return errorResponse(ERR.HOST_OFFLINE, "the host is not currently connected");

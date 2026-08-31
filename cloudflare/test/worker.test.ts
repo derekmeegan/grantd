@@ -10,7 +10,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { b64uDecode, b64uEncode } from "../src/crypto/encoding";
-import { ORIGIN, TestAgent, TestHost, newGrantId, now, randomBytes, sshLine } from "./helpers";
+import { ORIGIN, TestAgent, TestHost, newGrantId, now, randomBytes, solvePow, sshLine } from "./helpers";
 
 /** Frames carry opaque bytes, so a test host encodes its answers the same way. */
 function encodeBody(value: unknown): string {
@@ -294,7 +294,7 @@ describe("rendezvous", () => {
 describe("redemption routing", () => {
   it("returns HOST_OFFLINE when no daemon is connected", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const grantId = newGrantId();
     await host.publishGrant(grantId);
@@ -310,7 +310,7 @@ describe("redemption routing", () => {
 
   it("forwards the redemption envelope to the host byte for byte", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const grantId = newGrantId();
     await host.publishGrant(grantId);
@@ -355,7 +355,7 @@ describe("redemption routing", () => {
 
   it("relays a 64-bit certificate serial without losing precision", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const grantId = newGrantId();
     await host.publishGrant(grantId);
@@ -395,7 +395,7 @@ describe("redemption routing", () => {
 
   it("relays the host's rejection code rather than masking it", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const grantId = newGrantId();
     await host.publishGrant(grantId);
@@ -428,7 +428,7 @@ describe("redemption routing", () => {
 
   it("rejects a redemption whose agent signature does not verify", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const grantId = newGrantId();
     await host.publishGrant(grantId);
@@ -451,7 +451,7 @@ describe("redemption routing", () => {
   it("rejects a redemption addressed to a different host", async () => {
     const host = await TestHost.create();
     const other = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     await other.register();
     const grantId = newGrantId();
@@ -468,7 +468,7 @@ describe("redemption routing", () => {
 
   it("rejects a redemption for an unpublished grant", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const grantId = newGrantId();
     const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
@@ -481,7 +481,7 @@ describe("redemption routing", () => {
 
   it("caps redemption attempts per grant, which an edge rule keyed on IP cannot do", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const grantId = newGrantId();
     await host.publishGrant(grantId);
@@ -504,7 +504,7 @@ describe("redemption routing", () => {
 
   it("caps redemption attempts per host across many grants", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.create();
+    const agent = await TestAgent.registered();
     await host.register();
     const ws = await host.connect();
     respondWithBadProof(ws);
@@ -531,6 +531,48 @@ describe("redemption routing", () => {
     ws.close();
   });
 
+  it("refuses an unregistered agent", async () => {
+    const host = await TestHost.create();
+    // Deliberately not registered: this is the case that used to slip through.
+    const stranger = await TestAgent.create();
+    await host.register();
+    const grantId = newGrantId();
+    await host.publishGrant(grantId);
+
+    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
+      method: "POST",
+      body: JSON.stringify(await stranger.redemptionBody(host.hostId, grantId, randomBytes(32))),
+      headers: { "content-type": "application/json" },
+    });
+    expect(await errCode(res)).toBe("AGENT_NOT_FOUND");
+  });
+
+  it("refuses an unregistered agent before waking the host", async () => {
+    const host = await TestHost.create();
+    const stranger = await TestAgent.create();
+    await host.register();
+    const grantId = newGrantId();
+    await host.publishGrant(grantId);
+    const ws = await host.connect();
+
+    // The whole point of checking registration is that it happens before the
+    // customer's machine is disturbed. If the frame still arrives, the check is
+    // costing a round trip and buying nothing.
+    let woken = false;
+    ws.addEventListener("message", (e) => {
+      if (JSON.parse(String(e.data)).t === "redeem.request") woken = true;
+    });
+
+    await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
+      method: "POST",
+      body: JSON.stringify(await stranger.redemptionBody(host.hostId, grantId, randomBytes(32))),
+      headers: { "content-type": "application/json" },
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(woken).toBe(false);
+    ws.close();
+  });
+
   it("rejects an oversized body before parsing it", async () => {
     const host = await TestHost.create();
     await host.register();
@@ -541,5 +583,95 @@ describe("redemption routing", () => {
       headers: { "content-type": "application/json" },
     });
     expect(res.status).toBe(413);
+  });
+});
+
+describe("agent registration", () => {
+  it("issues a challenge with a proof of work and no expected answer", async () => {
+    const res = await SELF.fetch(`${ORIGIN}/v1/agent-challenges`, { method: "POST" });
+    expect(res.status).toBe(201);
+    const ch = (await res.json()) as Record<string, unknown>;
+    expect(ch).toHaveProperty("challenge_id");
+    expect(ch).toHaveProperty("pow");
+    // There is no question, and nothing that could leak an expected answer.
+    expect(ch).not.toHaveProperty("question");
+    expect(ch).not.toHaveProperty("answer");
+    expect(JSON.stringify(ch)).not.toContain("answer");
+  });
+
+  it("registers an agent that solves the proof of work", async () => {
+    const a = await TestAgent.create();
+    const res = await a.register();
+    expect(res.status).toBe(201);
+    const rec = await SELF.fetch(`${ORIGIN}/v1/agents/${a.agentId}`);
+    expect(rec.status).toBe(200);
+    // The record is public and holds nothing but a public key.
+    const body = (await rec.json()) as Record<string, unknown>;
+    expect(body.agent_id).toBe(a.agentId);
+    expect(Object.keys(body).sort()).toEqual([
+      "agent_id",
+      "captcha_version",
+      "created_at",
+      "last_seen_at",
+      "public_key",
+    ]);
+  });
+
+  it("rejects a registration with a wrong proof of work", async () => {
+    const a = await TestAgent.create();
+    const chRes = await SELF.fetch(`${ORIGIN}/v1/agent-challenges`, { method: "POST" });
+    const ch = (await chRes.json()) as { challenge_id: string };
+    const res = await SELF.fetch(`${ORIGIN}/v1/agents`, {
+      method: "POST",
+      body: JSON.stringify(await a.registrationBody(ch.challenge_id, "not-a-solution")),
+      headers: { "content-type": "application/json" },
+    });
+    expect(await errCode(res)).toBe("BAD_ANSWER");
+  });
+
+  it("rejects a registration whose agent_id is not the hash of its key", async () => {
+    const a = await TestAgent.create();
+    const other = await TestAgent.create();
+    const chRes = await SELF.fetch(`${ORIGIN}/v1/agent-challenges`, { method: "POST" });
+    const ch = (await chRes.json()) as {
+      challenge_id: string;
+      pow: { prefix: string; difficulty_bits: number };
+    };
+    const nonce = await solvePow(ch.pow.prefix, ch.pow.difficulty_bits);
+    const body = (await a.registrationBody(ch.challenge_id, nonce)) as Record<string, unknown>;
+    (body.registration as Record<string, unknown>).agent_id = other.agentId;
+    const res = await SELF.fetch(`${ORIGIN}/v1/agents`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+    });
+    expect(["ID_MISMATCH", "BAD_SIGNATURE"]).toContain(await errCode(res));
+  });
+
+  it("consumes a challenge exactly once", async () => {
+    const chRes = await SELF.fetch(`${ORIGIN}/v1/agent-challenges`, { method: "POST" });
+    const ch = (await chRes.json()) as {
+      challenge_id: string;
+      pow: { prefix: string; difficulty_bits: number };
+    };
+    const nonce = await solvePow(ch.pow.prefix, ch.pow.difficulty_bits);
+
+    const first = await TestAgent.create();
+    const r1 = await SELF.fetch(`${ORIGIN}/v1/agents`, {
+      method: "POST",
+      body: JSON.stringify(await first.registrationBody(ch.challenge_id, nonce)),
+      headers: { "content-type": "application/json" },
+    });
+    expect(r1.status).toBe(201);
+
+    // Reusing a solved challenge for a second identity must fail, or one proof
+    // of work would mint unlimited registrations.
+    const second = await TestAgent.create();
+    const r2 = await SELF.fetch(`${ORIGIN}/v1/agents`, {
+      method: "POST",
+      body: JSON.stringify(await second.registrationBody(ch.challenge_id, nonce)),
+      headers: { "content-type": "application/json" },
+    });
+    expect(await errCode(r2)).toBe("CHALLENGE_CONSUMED");
   });
 });
