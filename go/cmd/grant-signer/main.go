@@ -89,7 +89,13 @@ func (p *paths) bind(fs *flag.FlagSet) {
 	fs.StringVar(&p.state, "state", envOr("GRANTD_STATE", defaultStatePath), "path to the signer state database")
 	fs.StringVar(&p.ownerSock, "owner-sock", envOr("GRANTD_OWNER_SOCK", defaultOwnerSock), "owner Unix socket path")
 	fs.StringVar(&p.daemonSock, "daemon-sock", envOr("GRANTD_DAEMON_SOCK", defaultDaemonSock), "daemon Unix socket path")
-	fs.StringVar(&p.origin, "origin", envOr("GRANTD_ORIGIN", ""), "coordination service origin, e.g. https://grantd.example.workers.dev")
+	// GRANTD_PUBLIC_ORIGIN, not GRANTD_ORIGIN. The signer's origin is what a
+	// capability URL says — where the *recipient* will go. The daemon's origin
+	// is where this machine dials out. They are the same string in production
+	// and different behind NAT or in a container, and sharing one variable name
+	// would silently mint links only this machine can follow.
+	fs.StringVar(&p.origin, "origin", envOr("GRANTD_PUBLIC_ORIGIN", ""),
+		"public origin to embed in capability URLs, e.g. https://grantd.example.workers.dev")
 }
 
 func (p paths) identityKey() string { return filepath.Join(p.keyDir, "host_identity") }
@@ -235,6 +241,8 @@ func cmdServe(args []string, log *slog.Logger) error {
 	p.bind(fs)
 	ownerUID := fs.Int("owner-uid", -1, "uid permitted on the owner socket (-1 to rely on file permissions)")
 	daemonUID := fs.Int("daemon-uid", -1, "uid permitted on the daemon socket (-1 to rely on file permissions)")
+	ownerGID := fs.Int("owner-gid", -1, "group to own the owner socket (-1 to leave as created)")
+	daemonGID := fs.Int("daemon-gid", -1, "group to own the daemon socket (-1 to leave as created)")
 	purgeEvery := fs.Duration("purge-interval", 10*time.Minute, "how often to purge expired grants")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -249,12 +257,12 @@ func cmdServe(args []string, log *slog.Logger) error {
 
 	srv := &api.Server{Signer: s, Log: log}
 
-	ownerLn, err := listen(p.ownerSock, 0o660, *ownerUID, log, "owner")
+	ownerLn, err := listen(p.ownerSock, 0o660, *ownerUID, *ownerGID, log, "owner")
 	if err != nil {
 		return err
 	}
 	defer ownerLn.Close()
-	daemonLn, err := listen(p.daemonSock, 0o660, *daemonUID, log, "daemon")
+	daemonLn, err := listen(p.daemonSock, 0o660, *daemonUID, *daemonGID, log, "daemon")
 	if err != nil {
 		return err
 	}
@@ -302,10 +310,16 @@ func cmdServe(args []string, log *slog.Logger) error {
 	}
 }
 
-func listen(path string, mode os.FileMode, uid int, log *slog.Logger, which string) (net.Listener, error) {
-	ln, err := api.Listen(path, mode)
+func listen(path string, mode os.FileMode, uid, gid int, log *slog.Logger, which string) (net.Listener, error) {
+	ln, err := api.Listen(path, mode, -1, gid)
 	if err != nil {
 		return nil, err
+	}
+	if info, serr := os.Stat(path); serr == nil {
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			log.Info("socket ready", "socket", which, "path", path,
+				"uid", st.Uid, "gid", st.Gid, "mode", fmt.Sprintf("%04o", info.Mode().Perm()))
+		}
 	}
 	if uid < 0 {
 		return ln, nil

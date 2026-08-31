@@ -3,13 +3,13 @@ module github.com/derekmeegan/grantd/go
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.15
 	golang.org/x/crypto v0.55.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.57.0
 )
 
 require (
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect

@@ -27,3 +27,10 @@ id_ed25519*
 # scratch
 /tmp/
 .DS_Store
+
+# binaries staged into the e2e docker build context
+/tests/e2e/grantd
+/tests/e2e/grant-signer
+/tests/e2e/grantctl
+/tests/e2e/grant-agent
+/tests/e2e/build/

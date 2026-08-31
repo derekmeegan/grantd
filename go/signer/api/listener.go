@@ -12,14 +12,20 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
-// Listen creates a Unix socket with an exact mode, replacing any stale socket
-// left behind by an unclean shutdown.
+// Listen creates a Unix socket with an exact mode and owner, replacing any
+// stale socket left behind by an unclean shutdown.
 //
-// The socket is created inside a temporary name and renamed into place so that
-// there is no window in which it exists with the wrong permissions.
-func Listen(path string, mode os.FileMode) (net.Listener, error) {
+// The socket is created under a temporary name, given its mode and ownership,
+// and only then renamed into place. There is therefore no window in which a
+// listening socket exists with permissions wider than intended — which matters,
+// because file permissions are the mechanism that keeps the daemon off the
+// owner socket.
+//
+// uid and gid of -1 leave the current ownership alone.
+func Listen(path string, mode os.FileMode, uid, gid int) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -46,6 +52,11 @@ func Listen(path string, mode os.FileMode) (net.Listener, error) {
 		_ = os.Remove(tmp)
 		return nil, err
 	}
+	if err := ensureOwnership(tmp, uid, gid); err != nil {
+		ln.Close()
+		_ = os.Remove(tmp)
+		return nil, err
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		ln.Close()
 		_ = os.Remove(tmp)
@@ -56,6 +67,37 @@ func Listen(path string, mode os.FileMode) (net.Listener, error) {
 		ul.SetUnlinkOnClose(false)
 	}
 	return &namedListener{Listener: ln, path: path}, nil
+}
+
+// ensureOwnership makes the socket owned by the requested uid/gid, by whichever
+// route is available.
+//
+// The signer runs unprivileged, so chown usually fails. The supported
+// deployment puts each socket in a setgid directory, which makes the kernel
+// assign the right group at creation with no privilege at all. Either route is
+// fine; what is not fine is proceeding with the wrong owner, because socket
+// ownership is the mechanism that keeps the daemon off the owner socket.
+func ensureOwnership(path string, uid, gid int) error {
+	if uid < 0 && gid < 0 {
+		return nil
+	}
+	chownErr := os.Chown(path, uid, gid)
+	if chownErr == nil {
+		return nil
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return fmt.Errorf("api: stat %s: %w", path, err)
+	}
+	if uid >= 0 && int(st.Uid) != uid {
+		return fmt.Errorf("api: %s is owned by uid %d, want %d, and chown failed: %w",
+			path, st.Uid, uid, chownErr)
+	}
+	if gid >= 0 && int(st.Gid) != gid {
+		return fmt.Errorf("api: %s has group %d, want %d, and chown failed "+
+			"(is its directory setgid to that group?): %w", path, st.Gid, gid, chownErr)
+	}
+	return nil
 }
 
 type namedListener struct {
