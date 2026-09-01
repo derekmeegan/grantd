@@ -47,6 +47,37 @@ for tool in curl openssl ssh-keygen od base32 sed tr awk; do
   command -v "$tool" >/dev/null 2>&1 || { echo "redeem.sh needs $tool" >&2; exit 1; }
 done
 
+die() { echo "redeem.sh: $*" >&2; exit 1; }
+
+# Every HTTP call goes through this. `set -e` plus `curl -sf` would otherwise
+# exit with no output at all, which is the worst possible failure mode for a
+# script whose caller is often an agent with no terminal to inspect: a rate
+# limit and a typo in the URL would look identical, and both would look like
+# nothing happening.
+http() { # http <method> <url> [body] -> body on stdout, status on fd 3
+  _m="$1"; _u="$2"; _b="${3:-}"
+  _out="$(mktemp)"
+  if [ -n "$_b" ]; then
+    _code="$(curl -s -o "$_out" -w '%{http_code}' --connect-timeout 10 --max-time 60 \
+      -X "$_m" "$_u" -H 'content-type: application/json' -d "$_b")"
+  else
+    _code="$(curl -s -o "$_out" -w '%{http_code}' --connect-timeout 10 --max-time 60 \
+      -X "$_m" "$_u")"
+  fi
+  _body="$(cat "$_out")"; rm -f "$_out"
+  case "$_code" in
+    2*) printf '%s' "$_body"; return 0 ;;
+    000) die "could not reach $_u (connection failed or timed out)" ;;
+    429) die "rate limited by $_u — wait a minute and try again" ;;
+    *)
+      _err="$(printf '%s' "$_body" | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+      _msg="$(printf '%s' "$_body" | sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+      if [ -n "$_err" ]; then die "$_err: ${_msg:-HTTP $_code} (from $_u)"; fi
+      die "HTTP $_code from $_u: $(printf '%s' "$_body" | head -c 200)"
+      ;;
+  esac
+}
+
 [ -n "$OUT" ] || OUT="$(mktemp -d)"
 mkdir -p "$OUT"
 
@@ -199,9 +230,9 @@ PY
   done
 }
 
-if ! curl -sf -o /dev/null "$ORIGIN/v1/agents/$AGENT_ID"; then
+if ! curl -sf -o /dev/null --connect-timeout 10 --max-time 30 "$ORIGIN/v1/agents/$AGENT_ID"; then
   echo "registering $AGENT_ID" >&2
-  CH="$(curl -sf -X POST "$ORIGIN/v1/agent-challenges")"
+  CH="$(http POST "$ORIGIN/v1/agent-challenges")"
   CH_ID="$(json_str "$CH" challenge_id)"
   POW_PREFIX="$(json_str "$CH" prefix)"
   POW_BITS="$(json_num "$CH" difficulty_bits)"
@@ -219,11 +250,13 @@ if ! curl -sf -o /dev/null "$ORIGIN/v1/agents/$AGENT_ID"; then
       "$(f_u64   timestamp "$TS")")"
   REG_SIG="$(ed25519_sign_hex "$IDENTITY" "$REG_CBE")"
 
-  curl -sf -X POST "$ORIGIN/v1/agents" -H 'content-type: application/json' -d @- >/dev/null <<JSON
+  REG_BODY="$(cat <<JSON
 {"registration":{"version":1,"agent_id":"$AGENT_ID",
  "public_key":"$(unhex "$AGENT_PUB_HEX" | b64u)","challenge_id":"$CH_ID",
  "pow_nonce":"$POW_NONCE","timestamp":$TS},"signature":"$REG_SIG"}
 JSON
+)"
+  http POST "$ORIGIN/v1/agents" "$REG_BODY" >/dev/null
   echo "registered" >&2
 fi
 
@@ -273,17 +306,7 @@ BODY="$(cat <<JSON
 JSON
 )"
 
-BODY_FILE="$(mktemp)"
-CODE="$(curl -s -o "$BODY_FILE" -w '%{http_code}' -X POST \
-  "$ORIGIN/v1/hosts/$HOST_ID/grants/$GRANT_ID/redeem" \
-  -H 'content-type: application/json' -d "$BODY")"
-RESP="$(cat "$BODY_FILE")"
-rm -f "$BODY_FILE"
-
-if [ "$CODE" != "200" ]; then
-  echo "redemption failed (HTTP $CODE): $RESP" >&2
-  exit 1
-fi
+RESP="$(http POST "$ORIGIN/v1/hosts/$HOST_ID/grants/$GRANT_ID/redeem" "$BODY")"
 
 # The certificate is the only thing worth extracting; everything else in the
 # response is connection detail.

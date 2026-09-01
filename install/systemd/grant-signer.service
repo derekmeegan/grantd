@@ -1,7 +1,7 @@
 [Unit]
 Description=grantd signer (local trust root)
 Documentation=https://github.com/derekmeegan/grantd
-After=local-fs.target
+After=local-fs.target systemd-tmpfiles-setup.service
 Before=grantd.service
 
 [Service]
@@ -9,11 +9,17 @@ Type=simple
 User=grantsigner
 Group=grantsigner
 
-# The socket directories are setgid so that the unprivileged signer ends up with
-# owner.sock in the owner's group and redeem.sock in the daemon's, without
-# needing CAP_CHOWN or membership in either group. The + prefix runs this one
-# step as root.
-ExecStartPre=+/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/grantd.conf
+# The socket directories come from /usr/lib/tmpfiles.d/grantd.conf, which
+# systemd-tmpfiles-setup.service applies at boot — /run is a tmpfs, so they are
+# recreated every time. They are setgid, so the unprivileged signer ends up with
+# owner.sock in the owner's group and redeem.sock in the daemon's, needing
+# neither CAP_CHOWN nor membership in either group.
+#
+# This unit deliberately does not re-run systemd-tmpfiles itself. Doing so spawns
+# a privileged helper inside this unit's sandbox on every start, which is both
+# redundant and a failure mode of its own: the spawn has to set up the private
+# network namespace before it can run, and when that fails the trust root does
+# not start at all.
 ExecStart=/usr/local/lib/grantd/grant-signer serve \
     --owner-sock /run/grantd/owner/owner.sock \
     --daemon-sock /run/grantd/redeem/redeem.sock \

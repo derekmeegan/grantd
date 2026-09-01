@@ -35,3 +35,7 @@ id_ed25519*
 /tests/e2e/grant-agent
 /tests/e2e/build/
 /tests/install/stage/
+
+# release signing private key must never be committed
+grantd-release
+grantd-release.pub

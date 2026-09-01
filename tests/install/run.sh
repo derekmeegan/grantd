@@ -38,6 +38,10 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
   done )
 ok "binaries built for linux/$ARCH"
 
+# Build the image here rather than relying on one built earlier: a stale image
+# silently drops tools the tests need.
+docker build -q -t "$IMAGE" "$REPO/tests/install" >/dev/null
+
 step "booting a systemd machine"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" --privileged --cgroupns=host \

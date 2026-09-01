@@ -181,9 +181,12 @@ if [ -n "$LOCAL_DIR" ]; then
   done
 else
   command -v curl >/dev/null 2>&1 || die "curl is required to download a release"
+  # Bounded: an unreachable or hanging release host should fail the install, not
+  # wedge it. Without this a wrong --releases-url hangs indefinitely.
+  CURL="curl -fsSL --connect-timeout 10 --max-time 120 --retry 2"
   if [ -z "$VERSION" ]; then
     log "resolving the latest release"
-    curl -fsSL "$RELEASES_URL/latest.json" -o "$STAGE/latest.json" \
+    $CURL "$RELEASES_URL/latest.json" -o "$STAGE/latest.json" \
       || die "could not fetch $RELEASES_URL/latest.json"
     VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STAGE/latest.json" | head -1)"
     [ -n "$VERSION" ] || die "could not determine the latest version"
@@ -191,10 +194,10 @@ else
   log "downloading grantd $VERSION (linux/$ARCH)"
   BASE="$RELEASES_URL/$VERSION"
   for b in grantd grant-signer; do
-    curl -fsSL "$BASE/${b}-linux-${ARCH}" -o "$STAGE/$b" || die "could not download $b"
+    $CURL "$BASE/${b}-linux-${ARCH}" -o "$STAGE/$b" || die "could not download $b"
   done
-  curl -fsSL "$BASE/SHA256SUMS" -o "$STAGE/SHA256SUMS" || die "could not download SHA256SUMS"
-  curl -fsSL "$BASE/SHA256SUMS.sig" -o "$STAGE/SHA256SUMS.sig" || die "could not download SHA256SUMS.sig"
+  $CURL "$BASE/SHA256SUMS" -o "$STAGE/SHA256SUMS" || die "could not download SHA256SUMS"
+  $CURL "$BASE/SHA256SUMS.sig" -o "$STAGE/SHA256SUMS.sig" || die "could not download SHA256SUMS.sig"
 
   # Signature first, then hashes. Verifying hashes against an unsigned SHA256SUMS
   # proves only that the download was not corrupted, which is not the question.
