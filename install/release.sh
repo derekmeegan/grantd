@@ -138,14 +138,45 @@ echo "staged at $STAGE"
 if [ "$PUBLISH" -eq 1 ]; then
   command -v npx >/dev/null 2>&1 || die "npx is required to publish"
   log "publishing to r2://$BUCKET"
-  ( cd "$REPO/cloudflare"
-    for f in "$STAGE"/*; do
-      name="$(basename "$f")"
-      npx wrangler r2 object put "$BUCKET/$VERSION/$name" --file="$f" --remote >/dev/null
-      echo "    $VERSION/$name"
+
+  # Uploads retry, and latest.json is written only after every artifact is
+  # confirmed present. The order already mattered — latest.json last means a
+  # failed publish leaves the previous release intact rather than pointing at a
+  # half-uploaded one — but a single dropped connection would still strand a
+  # partial directory in the bucket. Both halves are now checked.
+  put() { # put LOCAL_FILE REMOTE_KEY [EXTRA_ARGS...]
+    local file="$1" key="$2"; shift 2
+    local attempt=1
+    while [ "$attempt" -le 3 ]; do
+      if ( cd "$REPO/cloudflare" && npx wrangler r2 object put "$BUCKET/$key" \
+             --file="$file" --remote "$@" >/dev/null 2>&1 ); then
+        return 0
+      fi
+      echo "    retrying $key (attempt $attempt failed)" >&2
+      attempt=$((attempt + 1))
+      sleep 3
     done
-    npx wrangler r2 object put "$BUCKET/latest.json" --file="$OUT/latest.json" \
-      --content-type=application/json --remote >/dev/null
-    echo "    latest.json" )
+    die "could not upload $key after 3 attempts"
+  }
+
+  for f in "$STAGE"/*; do
+    name="$(basename "$f")"
+    put "$f" "$VERSION/$name"
+    echo "    $VERSION/$name"
+  done
+
+  # Verify what is actually readable before advertising it. wrangler reporting
+  # success is not the same as the object being fetchable.
+  log "verifying the published release"
+  for f in "$STAGE"/*; do
+    name="$(basename "$f")"
+    ( cd "$REPO/cloudflare" && npx wrangler r2 object get "$BUCKET/$VERSION/$name" \
+        --remote --file=/dev/null >/dev/null 2>&1 ) \
+      || die "$VERSION/$name is not readable back from the bucket"
+  done
+  echo "    all $(ls -1 "$STAGE" | wc -l | tr -d ' ') objects readable"
+
+  put "$OUT/latest.json" "latest.json" --content-type=application/json
+  echo "    latest.json"
   log "published"
 fi

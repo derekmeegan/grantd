@@ -30,7 +30,10 @@ TARGET=""
 SSH_USER=agentuser
 ADVERTISE=""
 ORIGIN="${GRANTD_TEST_ORIGIN:-https://grantd.derekmeegan.workers.dev}"
-VERSION="${GRANTD_TEST_VERSION:-v0.1.0}"
+# Pinned rather than tracking latest, so a failure here is unambiguous: it means
+# this release broke, not that someone published a new one mid-run. Bump it when
+# you cut a release.
+VERSION="${GRANTD_TEST_VERSION:-v0.2.0}"
 ASSUME_YES=0
 KEEP=0
 USER_CREATED=0
