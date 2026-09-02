@@ -1,10 +1,8 @@
 /**
- * AgentDO — one Durable Object per registered agent identity.
+ * AgentDO, one Durable Object per registered agent identity.
  *
- * It stores a public key and nothing else of consequence. Being registered is
- * not a permission: it is a name to attribute redemptions to and a handle to
- * rate limit. A visiting agent with a valid registration and no grant secret
- * can do exactly nothing.
+ * It stores a public key. Registration is a name for attribution and a
+ * handle for rate limiting. It grants nothing.
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -14,16 +12,16 @@ import { agentId as deriveAgentId, verifyEd25519 } from "../crypto/ids";
 import {
   canonicalAgentRegistration,
   parseAgentRegistration,
+  parseSignature,
   ParseError,
   SKEW_REGISTRATION,
   withinSkew,
 } from "../protocol";
 import type { Env } from "../env";
 
-interface Record_ {
+export interface AgentRecord {
   agent_id: string;
   public_key: string;
-  captcha_version: number;
   created_at: number;
   last_seen_at: number;
 }
@@ -35,7 +33,6 @@ export class AgentDO extends DurableObject<Env> {
     try {
       if (request.method === "PUT" && rest.length === 0) return await this.register(request);
       if (request.method === "GET" && rest.length === 0) return await this.publicRecord();
-      if (request.method === "POST" && rest[0] === "seen") return await this.touch();
       return errorResponse(ERR.BAD_REQUEST, "no such agent route", 404);
     } catch (e) {
       if (e instanceof ParseError) return errorResponse(e.code, e.message);
@@ -47,9 +44,9 @@ export class AgentDO extends DurableObject<Env> {
   private async register(request: Request): Promise<Response> {
     const body = (await request.json()) as Record<string, unknown>;
     const reg = parseAgentRegistration(body.registration);
-    const signature = decodeSig(body.signature);
+    const signature = parseSignature(body);
 
-    // Self-certifying: the ID must be the hash of the key being registered.
+    // The ID is a hash of the key. Recompute it instead of trusting it.
     const derived = await deriveAgentId(reg.public_key);
     if (derived !== reg.agent_id) {
       return errorResponse(ERR.ID_MISMATCH, "agent_id does not match public_key");
@@ -59,13 +56,12 @@ export class AgentDO extends DurableObject<Env> {
     if (!withinSkew(now, reg.timestamp, SKEW_REGISTRATION)) {
       return errorResponse(ERR.STALE_TIMESTAMP, "registration timestamp is outside the allowed window");
     }
-    // Proof of possession: the signature is the only thing that shows the
-    // registrant actually holds the private half.
+    // The signature is the proof that the registrant holds the private key.
     if (!(await verifyEd25519(reg.public_key, canonicalAgentRegistration(reg), signature))) {
       return errorResponse(ERR.BAD_SIGNATURE, "registration signature does not verify");
     }
 
-    const existing = await this.ctx.storage.get<Record_>("record");
+    const existing = await this.ctx.storage.get<AgentRecord>("record");
     const encoded = b64uEncode(reg.public_key);
     if (existing) {
       if (existing.public_key !== encoded) {
@@ -76,10 +72,9 @@ export class AgentDO extends DurableObject<Env> {
       return jsonResponse({ agent_id: reg.agent_id, registered: true, existing: true });
     }
 
-    const rec: Record_ = {
+    const rec: AgentRecord = {
       agent_id: reg.agent_id,
       public_key: encoded,
-      captcha_version: 1,
       created_at: now,
       last_seen_at: now,
     };
@@ -89,31 +84,14 @@ export class AgentDO extends DurableObject<Env> {
   }
 
   private async publicRecord(): Promise<Response> {
-    const rec = await this.ctx.storage.get<Record_>("record");
+    const rec = await this.ctx.storage.get<AgentRecord>("record");
     if (!rec) return errorResponse(ERR.AGENT_NOT_FOUND, "no such agent");
-    return jsonResponse(rec);
+    const out: AgentRecord = {
+      agent_id: rec.agent_id,
+      public_key: rec.public_key,
+      created_at: rec.created_at,
+      last_seen_at: rec.last_seen_at,
+    };
+    return jsonResponse(out);
   }
-
-  private async touch(): Promise<Response> {
-    const rec = await this.ctx.storage.get<Record_>("record");
-    if (!rec) return errorResponse(ERR.AGENT_NOT_FOUND, "no such agent");
-    rec.last_seen_at = Math.floor(Date.now() / 1000);
-    await this.ctx.storage.put("record", rec);
-    return jsonResponse({ agent_id: rec.agent_id, seen: true });
-  }
-}
-
-function decodeSig(v: unknown): Uint8Array {
-  if (typeof v !== "string") throw new ParseError(ERR.BAD_REQUEST, "signature must be a base64url string");
-  const padded = v.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (v.length % 4)) % 4);
-  let bin: string;
-  try {
-    bin = atob(padded);
-  } catch {
-    throw new ParseError(ERR.BAD_REQUEST, "signature must be base64url without padding");
-  }
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  if (out.length !== 64) throw new ParseError(ERR.BAD_REQUEST, "signature must be 64 bytes");
-  return out;
 }

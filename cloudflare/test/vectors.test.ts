@@ -1,16 +1,14 @@
 /**
  * Cross-language conformance.
  *
- * These fixtures were produced by the Go implementation and are checked here by
- * the TypeScript one. Neither implementation is allowed to be "the reference";
- * both are written from protocol/v1.md and both must independently reproduce
- * the same bytes. Two implementations that only ever talk to each other can be
- * wrong in the same way forever and never notice.
+ * The Go implementation produced these fixtures. The TypeScript one checks
+ * them here. Neither implementation is the reference. Both are written from
+ * protocol/v1.md and both must reproduce the same bytes.
  */
 
 import { describe, expect, it } from "vitest";
 import vectors from "../../protocol/test-vectors/v1.json";
-import { hexDecode, hexEncode, b64uEncode } from "../src/crypto/encoding";
+import { b64uDecode, b64uEncode, hexDecode, hexEncode } from "../src/crypto/encoding";
 import { agentId, hostId, verifyEd25519 } from "../src/crypto/ids";
 import {
   CTX_AGENT_REGISTER,
@@ -45,14 +43,9 @@ const bundle = vectors as unknown as {
   vectors: Vector[];
 };
 
-/** base64url-decode a field of the JSON message, as a real peer would. */
+/** base64url-decodes a field of the JSON message, as a real peer does. */
 function b(v: unknown): Uint8Array {
-  const s = String(v);
-  const padded = s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4);
-  const bin = atob(padded);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  return b64uDecode(String(v));
 }
 
 function n(v: unknown): bigint {
@@ -135,12 +128,7 @@ async function publicFromSeed(seed: Uint8Array): Promise<Uint8Array> {
     "sign",
   ]);
   const jwk = (await crypto.subtle.exportKey("jwk", key)) as JsonWebKey;
-  const x = jwk.x as string;
-  const padded = x.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (x.length % 4)) % 4);
-  const bin = atob(padded);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  return b64uDecode(jwk.x as string);
 }
 
 describe("cross-language protocol vectors", () => {

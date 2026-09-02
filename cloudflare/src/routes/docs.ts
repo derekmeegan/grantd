@@ -1,10 +1,9 @@
 /**
- * The API is the documentation.
+ * The API is its own documentation.
  *
- * A visiting agent arrives holding nothing but a URL. Everything it needs to
- * get from that URL to an SSH session has to be discoverable with curl, so
- * these endpoints return plain text describing the exact requests to make.
- * There is no SDK to install and no client library to be out of date.
+ * A visiting agent arrives with nothing but a URL. Everything it needs must
+ * be discoverable with curl. These endpoints return plain text that describes
+ * the exact requests to make.
  */
 
 export function docsMarkdown(origin: string): string {
@@ -139,16 +138,31 @@ Redeem it like this.
 
    On success you receive hostname, port, user, and a certificate.
 
-6. Save the certificate next to your key and connect:
+6. Do not trust that response on its own. This service is not trusted.
+   GET ${origin}/v1/hosts/${hostId} returns the host's signed registration
+   under "registration" and "signature". Make sure that the host id derives
+   from registration.identity_public_key, that the signature verifies over
+   CBE("grantd/v1/host-register", registration), and that hostname, port
+   and user in the response equal the signed values. Make sure that the
+   certificate was signed by registration.ssh_ca_public_key, is for your
+   key, and names only that user. protocol/v1.md section 7.1 lists the exact
+   steps.
+
+7. Save the certificate next to your key and connect. Pass the user and the
+   host as separate arguments. Never build "user@host" from untrusted text.
 
      printf '%s\\n' "$certificate" > ./grantd-key-cert.pub
      ssh -i ./grantd-key -o CertificateFile=./grantd-key-cert.pub \\
-       -p "$port" "$user@$hostname"
+       -l "$user" -p "$port" -- "$hostname"
 
-If you would rather not implement the canonical encoding yourself, this does the
-whole flow with curl, openssl and ssh-keygen, and nothing else:
+If you would rather not implement this yourself, redeem.sh does the whole
+flow, including every check above, with curl, openssl and ssh-keygen:
 
-  curl -sO ${origin}/redeem.sh && sh redeem.sh '<the full URL, including #secret>'
+  curl -sO ${origin}/redeem.sh
+  GRANTD_CAPABILITY='<the full URL, including #secret>' sh redeem.sh
+
+Fetching redeem.sh from here means trusting this service to deliver that
+script. The same script is in the grantd repository under install/redeem.sh.
 
 It needs OpenSSL 3.x. macOS ships LibreSSL as 'openssl', which cannot do
 Ed25519 at all; the script looks for a capable binary and tells you if it

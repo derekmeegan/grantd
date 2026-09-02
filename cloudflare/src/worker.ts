@@ -2,19 +2,17 @@
  * grantd coordination Worker.
  *
  * A router. It parses HTTP, enforces sizes and rate limits, checks that
- * identifiers are well formed, and hands the request to the Durable Object that
- * owns that host, agent, or challenge. It deliberately holds no authoritative
- * state and makes no authorization decision about SSH access — it could not
- * make one correctly even if it tried, because the only thing that authorizes
- * access is a secret it never receives.
+ * identifiers are well formed, and hands the request to the Durable Object
+ * that owns the host, agent, or challenge. It makes no authorization decision
+ * about SSH access. The only thing that authorizes access is a secret it
+ * never receives.
  */
 
 import { ERR, errorResponse, jsonResponse, scriptResponse, textResponse } from "./errors";
-import { AGENT_ID_RE, GRANT_ID_RE, HOST_ID_RE, newChallengeId } from "./crypto/ids";
-import { MAX_REQUEST_BYTES } from "./protocol";
+import { AGENT_ID_RE, CHALLENGE_ID_RE, GRANT_ID_RE, HOST_ID_RE, newChallengeId } from "./crypto/ids";
+import { MAX_REQUEST_BYTES, parseJsonObject } from "./protocol";
 import { docsMarkdown, grantInstructions } from "./routes/docs";
-// Imported as text so there is exactly one copy of this script in the
-// repository: the one install/ ships and the test suite runs.
+// Imported as text so the script agents download is the one the test suite runs.
 import redeemScript from "../../install/redeem.sh";
 import installScriptFile from "../../install/install.sh";
 import type { Env, RateLimiter } from "./env";
@@ -24,9 +22,9 @@ export { AgentDO } from "./durable-objects/agent";
 export { ChallengeDO } from "./durable-objects/challenge";
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     try {
-      return await route(request, env, ctx);
+      return await route(request, env);
     } catch (e) {
       console.error("worker error", { message: String(e) });
       return errorResponse(ERR.INTERNAL, "internal error");
@@ -34,7 +32,7 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-async function route(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const origin = env.PUBLIC_ORIGIN || url.origin;
   const seg = url.pathname.split("/").filter(Boolean);
@@ -52,10 +50,8 @@ async function route(request: Request, env: Env, _ctx: ExecutionContext): Promis
     return scriptResponse(installScriptFile);
   }
 
-  // Human- and agent-readable capability landing page. The secret is in the
-  // fragment, so it never reaches this handler; nothing here reads, logs, or
-  // accepts one, and a request that puts a secret in the path or query is
-  // answered without echoing it back.
+  // Capability landing page. The secret is in the URL fragment, so it never
+  // reaches this handler. Nothing here reads or echoes a query string.
   if (request.method === "GET" && seg[0] === "g" && seg.length === 3) {
     const [, hostId, grantId] = seg;
     if (!HOST_ID_RE.test(hostId) || !GRANT_ID_RE.test(grantId)) {
@@ -64,9 +60,7 @@ async function route(request: Request, env: Env, _ctx: ExecutionContext): Promis
     return textResponse(grantInstructions(origin, hostId, grantId));
   }
 
-  // Release artifacts, served from R2 so the installer needs no second origin.
-  // Read-only: there is no upload path here, and the release signing key lives
-  // nowhere near Cloudflare.
+  // Release artifacts from R2. Read-only. The release signing key is not on Cloudflare.
   if (request.method === "GET" && seg[0] === "releases") {
     return await serveRelease(env, seg.slice(1).join("/"));
   }
@@ -97,20 +91,19 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
     const body = await readJson(request);
     if (body instanceof Response) return body;
 
-    const reg = (body as Record<string, unknown>).registration as Record<string, unknown> | undefined;
+    const reg = body.registration as Record<string, unknown> | undefined;
     const challengeId = typeof reg?.challenge_id === "string" ? reg.challenge_id : "";
     const agentId = typeof reg?.agent_id === "string" ? reg.agent_id : "";
     const powNonce = typeof reg?.pow_nonce === "string" ? reg.pow_nonce : "";
     if (!AGENT_ID_RE.test(agentId)) {
       return errorResponse(ERR.BAD_REQUEST, "malformed agent_id");
     }
-    if (!challengeId) {
-      return errorResponse(ERR.BAD_REQUEST, "challenge_id is required");
+    if (!CHALLENGE_ID_RE.test(challengeId)) {
+      return errorResponse(ERR.BAD_REQUEST, "malformed challenge_id");
     }
 
-    // Consume the challenge first. If registration then fails for any reason
-    // the challenge is still spent, which is the safe direction: a failed
-    // attempt costs the caller a fresh proof of work.
+    // Consume the challenge first. If registration then fails, the challenge
+    // is still spent. A failed attempt costs the caller a fresh proof of work.
     const chStub = env.CHALLENGES.get(env.CHALLENGES.idFromName(challengeId));
     const consumed = await chStub.fetch(
       new Request(`https://do/challenge/${challengeId}/consume`, {
@@ -155,7 +148,7 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
       return await stub.fetch(new Request(`https://do/host/${hostId}`, init));
     }
 
-    // Rendezvous upgrade. Headers carry the host's signature; the body is empty.
+    // Rendezvous upgrade. The headers carry the host's signature. The body is empty.
     if (rest.length === 1 && rest[0] === "connect" && request.method === "GET") {
       return await stub.fetch(
         new Request(`https://do/host/${hostId}/connect`, {
@@ -189,10 +182,9 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
     if (rest[0] === "grants" && rest.length === 3 && rest[2] === "redeem" && request.method === "POST") {
       const grantId = rest[1];
       if (!GRANT_ID_RE.test(grantId)) return errorResponse(ERR.BAD_REQUEST, "malformed grant_id");
-      // Two limiters, because they stop different attacks. The IP-keyed one
-      // stops one noisy source; the grant-keyed one stops a distributed flood
-      // against a single capability, which is the case that would otherwise
-      // let anyone with a grant id repeatedly wake someone else's machine.
+      // Two limiters for two attacks. The IP-keyed one stops one noisy
+      // source. The grant-keyed one stops a distributed flood against one
+      // capability, which wakes someone else's machine on every attempt.
       if (!(await allow(env.REDEMPTION_LIMITER, clientKey(request), "redemption-ip"))) {
         return errorResponse(ERR.RATE_LIMITED, "too many redemption attempts");
       }
@@ -203,8 +195,9 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
       }
       const raw = await readRaw(request);
       if (raw instanceof Response) return raw;
-      // Forwarded verbatim: the host must verify the bytes the agent signed,
-      // not a re-serialization produced here.
+      // Garbage is refused here, before a Durable Object is woken.
+      if (!parseJsonObject(raw)) return errorResponse(ERR.BAD_REQUEST, "body must be a JSON object");
+      // Forwarded verbatim. The host must verify the bytes the agent signed.
       return await stub.fetch(
         new Request(`https://do/host/${hostId}/grants/${grantId}/redeem`, {
           method: "POST",
@@ -235,52 +228,42 @@ async function serveRelease(env: Env, key: string): Promise<Response> {
 
 // ---------------------------------------------------------------- utilities
 
+/** Reads the body as text. Rejects more than MAX_REQUEST_BYTES, measured in bytes. */
 async function readRaw(request: Request): Promise<string | Response> {
   const declared = request.headers.get("content-length");
   if (declared && Number(declared) > MAX_REQUEST_BYTES) {
     return errorResponse(ERR.BAD_REQUEST, "request body too large", 413);
   }
   const text = await request.text();
-  if (text.length > MAX_REQUEST_BYTES) {
+  if (new TextEncoder().encode(text).length > MAX_REQUEST_BYTES) {
     return errorResponse(ERR.BAD_REQUEST, "request body too large", 413);
   }
   return text;
 }
 
-async function readJson(request: Request): Promise<unknown | Response> {
+async function readJson(request: Request): Promise<Record<string, unknown> | Response> {
   const raw = await readRaw(request);
   if (raw instanceof Response) return raw;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return errorResponse(ERR.BAD_REQUEST, "body must be a JSON object");
-    }
-    return parsed;
-  } catch {
-    return errorResponse(ERR.BAD_REQUEST, "malformed JSON body");
-  }
+  const parsed = parseJsonObject(raw);
+  if (!parsed) return errorResponse(ERR.BAD_REQUEST, "body must be a JSON object");
+  return parsed;
 }
 
 /**
- * Rate limit key for the caller's IP, or null when there is no client IP.
+ * Rate limit key for the caller's IP, or null when there is none.
  *
- * Returning null rather than a constant matters. A shared fallback bucket would
- * mean that in any context without CF-Connecting-IP — local dev, tests, a
- * misconfigured route — every caller in the world shares one limit and throttles
- * everyone else. Cloudflare sets this header itself and overwrites any
- * client-supplied value, so its absence means "not behind Cloudflare", not
- * "attacker removed it".
+ * Null skips the limiter. A shared fallback bucket makes every caller
+ * without the header share one limit. Cloudflare sets CF-Connecting-IP
+ * itself, so its absence means "not behind Cloudflare".
  */
 function clientKey(request: Request): string | null {
   return request.headers.get("CF-Connecting-IP");
 }
 
 /**
- * Applies a rate limiter if the binding exists.
- *
- * Fails open, because a broken limiter should not take the service down — but
- * it logs when it does, so that a persistently failing binding is visible
- * instead of silently disabling the limit forever.
+ * Applies a rate limiter if the binding exists. Fails open, so a broken
+ * limiter does not take the service down, and logs ratelimit.unavailable
+ * so a failing binding is visible.
  */
 async function allow(
   limiter: RateLimiter | undefined,

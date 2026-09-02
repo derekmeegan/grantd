@@ -1,9 +1,9 @@
 /**
  * Test helpers that play the parts of a host and a visiting agent.
  *
- * These deliberately construct messages the same way the real Go
- * implementations do — from canonical bytes, with real Ed25519 signatures — so
- * that the Worker tests exercise verification rather than a mock of it.
+ * They build messages the way the real Go implementations do: from canonical
+ * bytes, with real Ed25519 signatures. The Worker tests then exercise
+ * verification, not a mock of it.
  */
 
 import { SELF } from "cloudflare:test";
@@ -268,9 +268,8 @@ export class TestAgent {
   }
 
   /**
-   * Registers this identity for real: fetches a challenge, solves the proof of
-   * work, and posts a signed registration. Redemption requires it, so tests
-   * that exercise the happy path have to do what a real agent does.
+   * Registers this identity for real: fetches a challenge, solves the proof
+   * of work, and posts a signed registration. Redemption requires it.
    */
   async register(): Promise<Response> {
     const chRes = await SELF.fetch(`${ORIGIN}/v1/agent-challenges`, { method: "POST" });

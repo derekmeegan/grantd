@@ -1,26 +1,13 @@
 /**
- * Agent admission control.
+ * Agent admission control: a proof of work.
  *
- * This is a proof of work and nothing else. An earlier version also asked a
- * natural-language question, on the theory that it demonstrated liveness and
- * instruction-following. It was removed, because it was theater: the reference
- * solver shipped in this repository and handled every template, nothing ever
- * acted on the signal, and it cost a round trip and a template generator to
- * produce a number nobody read.
- *
- * What remains has a narrow, honest job. `/v1/agent-challenges` and
- * `/v1/agents` are unauthenticated endpoints that allocate Durable Objects, so
- * without a cost function anyone can make the service allocate without bound.
- * Twenty bits is about a second of CPU: free for one agent, expensive for a
- * million. It protects the bill, not the customer's machine.
- *
- * Registration is likewise an abuse control, not a security boundary — see
- * protocol/v1.md §11. It cannot be anything else in this architecture: the
- * signer is the only party whose opinion authorizes access, and it has no
- * network and no registry to consult.
+ * /v1/agent-challenges and /v1/agents are unauthenticated and allocate
+ * Durable Objects. The proof of work puts a CPU cost on each registration.
+ * It protects the bill. It is not a security boundary, see protocol/v1.md
+ * section 11.
  */
 
-/** Leading zero bits of a digest, used to score proof of work. */
+/** Leading zero bits of a digest. Scores a proof of work. */
 export function leadingZeroBits(digest: Uint8Array): number {
   let n = 0;
   for (const byte of digest) {
@@ -37,14 +24,17 @@ export function leadingZeroBits(digest: Uint8Array): number {
   return n;
 }
 
-/** Verifies SHA-256(prefix || utf8(nonce)) has at least difficultyBits zeros. */
+/** Longest nonce the protocol allows, in bytes. */
+export const MAX_POW_NONCE_BYTES = 64;
+
+/** Verifies that SHA-256(prefix || utf8(nonce)) has at least difficultyBits leading zeros. */
 export async function verifyPow(
   prefix: Uint8Array,
   difficultyBits: number,
   nonce: string,
 ): Promise<boolean> {
-  if (nonce.length === 0 || nonce.length > 64) return false;
   const nonceBytes = new TextEncoder().encode(nonce);
+  if (nonceBytes.length === 0 || nonceBytes.length > MAX_POW_NONCE_BYTES) return false;
   const buf = new Uint8Array(prefix.length + nonceBytes.length);
   buf.set(prefix, 0);
   buf.set(nonceBytes, prefix.length);

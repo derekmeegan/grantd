@@ -1,15 +1,8 @@
 /**
- * grantd Canonical Binary Encoding (CBE) — protocol/v1.md §1.
+ * grantd Canonical Binary Encoding (CBE), protocol/v1.md section 1.
  *
- * This is the TypeScript half of a deliberately duplicated implementation. The
- * Go signer and this Worker must produce identical bytes for identical
- * messages, and the only thing that keeps that true over time is that both are
- * written from the spec and both are checked against
- * protocol/test-vectors/v1.json.
- *
- * CBE is used instead of canonical JSON so that key ordering, duplicate keys,
- * Unicode escaping, number formatting and whitespace cannot become a
- * cross-implementation disagreement.
+ * The Go signer has its own copy of this encoder. Both are written from the
+ * spec and both are checked against protocol/test-vectors/v1.json.
  */
 
 export const TAG_STRING = 0x01;
@@ -17,7 +10,7 @@ export const TAG_U64 = 0x02;
 export const TAG_BYTES = 0x03;
 export const TAG_BOOL = 0x04;
 
-/** Largest U64 the protocol permits, so signed-64-bit languages cannot differ. */
+/** Largest U64 the protocol permits. Signed 64-bit languages can represent it. */
 export const MAX_U64 = (1n << 63n) - 1n;
 
 export type Field =
@@ -33,7 +26,6 @@ export const U = (name: string, value: bigint | number): Field => ({
   value: typeof value === "bigint" ? value : BigInt(value),
 });
 export const B = (name: string, value: Uint8Array): Field => ({ name, tag: TAG_BYTES, value });
-export const BL = (name: string, value: boolean): Field => ({ name, tag: TAG_BOOL, value });
 
 export class CanonicalError extends Error {}
 
@@ -42,12 +34,11 @@ const utf8 = new TextEncoder();
 const utf8Decode = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
- * Rejects strings that would not survive a round trip through UTF-8, and
- * strings containing U+0000.
+ * Encodes a string as UTF-8. Rejects U+0000 and strings that do not survive
+ * a UTF-8 round trip.
  *
- * A lone surrogate encodes to U+FFFD rather than throwing, which would silently
- * change the signed bytes without anyone noticing, so the check is a re-decode
- * and comparison rather than a scan for suspicious characters.
+ * Trap: TextEncoder turns a lone surrogate into U+FFFD instead of throwing.
+ * That silently changes the signed bytes. The re-decode and compare catches it.
  */
 function encodeString(name: string, s: string): Uint8Array {
   if (s.includes(NUL)) {
@@ -107,8 +98,8 @@ class Writer {
  *   || u32be(len(fields))
  *   || for each field: LP(utf8(name)) || tag || LP(value)
  *
- * Field order is the order given, never sorted. Names are covered so that a
- * value cannot be shifted into another field's position.
+ * Field order is the order given. Names are encoded so a value cannot move
+ * into another field's position.
  */
 export function encode(context: string, fields: Field[]): Uint8Array {
   if (context.length === 0) throw new CanonicalError("canonical: context is empty");

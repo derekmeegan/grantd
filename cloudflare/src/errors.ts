@@ -1,4 +1,4 @@
-/** Protocol error codes and the uniform error envelope — protocol/v1.md §10. */
+/** Protocol error codes and the uniform error envelope, protocol/v1.md section 10. */
 
 export const ERR = {
   BAD_REQUEST: "BAD_REQUEST",
@@ -21,6 +21,7 @@ export const ERR = {
   BAD_PROOF: "BAD_PROOF",
   RATE_LIMITED: "RATE_LIMITED",
   TOO_MANY_GRANTS: "TOO_MANY_GRANTS",
+  /** Not a protocol code. Used for failures inside this service. */
   INTERNAL: "INTERNAL",
 } as const;
 
@@ -53,17 +54,19 @@ export function statusFor(code: string): number {
   return STATUS[code] ?? 500;
 }
 
+const BASE_HEADERS = { "x-content-type-options": "nosniff" };
+
 export function errorResponse(code: string, message: string, status?: number): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
     status: status ?? statusFor(code),
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { ...BASE_HEADERS, "content-type": "application/json; charset=utf-8" },
   });
 }
 
 export function jsonResponse(body: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", ...headers },
+    headers: { ...BASE_HEADERS, "content-type": "application/json; charset=utf-8", ...headers },
   });
 }
 
@@ -75,17 +78,14 @@ export function textResponse(
 ): Response {
   return new Response(body, {
     status,
-    headers: { "content-type": contentType, ...extraHeaders },
+    headers: { ...BASE_HEADERS, "content-type": contentType, ...extraHeaders },
   });
 }
 
 /**
- * Scripts people pipe into a shell are served uncached.
- *
- * The edge will happily hold an old copy otherwise, which means a fix deployed
- * to install.sh or redeem.sh does not reach anyone for minutes — and the person
- * running it has no way to tell which version they got. For a script that
- * modifies sshd, "you ran the previous one" is not an acceptable ambiguity.
+ * Scripts that people pipe into a shell are served uncached. A cached copy
+ * of install.sh or redeem.sh can be an old version, and the person who runs
+ * it cannot tell.
  */
 export function scriptResponse(body: string): Response {
   return textResponse(body, 200, "text/x-shellscript; charset=utf-8", {

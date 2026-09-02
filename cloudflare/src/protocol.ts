@@ -1,16 +1,16 @@
 /**
  * grantd v1 message schemas for the coordination service.
  *
- * The Worker's job is to route, and to refuse to route obvious garbage. It
- * verifies host signatures because it must know which host a connection belongs
- * to, and it verifies agent signatures because attribution and rate limiting
- * depend on them. It does not, and cannot, verify a redemption proof: that
- * requires the grant secret, which by design it never has.
+ * The Worker routes messages and refuses obvious garbage. It verifies host
+ * signatures to know which host a request belongs to. It verifies agent
+ * signatures for attribution and rate limiting. It cannot verify a
+ * redemption proof, because it never holds the grant secret.
  */
 
 import { encode, S, U, B, type Field } from "./canonical/cbe";
-import { b64uDecode } from "./crypto/encoding";
-import { AGENT_ID_RE, GRANT_ID_RE, HOST_ID_RE, PROTOCOL_VERSION } from "./crypto/ids";
+import { b64StdDecode, b64StdEncodeNoPad, b64uDecode, b64uEncode } from "./crypto/encoding";
+import { AGENT_ID_RE, GRANT_ID_RE, HOST_ID_RE, PROTOCOL_VERSION, sha256 } from "./crypto/ids";
+import { MAX_POW_NONCE_BYTES } from "./captcha";
 
 export const CTX_HOST_REGISTER = "grantd/v1/host-register";
 export const CTX_HOST_CONNECT = "grantd/v1/host-connect";
@@ -26,11 +26,10 @@ export const MIN_GRANT_TTL = 60;
 
 export const MAX_REQUEST_BYTES = 16 * 1024;
 export const MAX_SSH_PUBKEY_BYTES = 1024;
-export const MAX_POW_NONCE_BYTES = 64;
 export const MAX_HOSTNAME_BYTES = 253;
 export const MAX_USERNAME_BYTES = 32;
 
-/** A parse failure carrying the protocol error code the client should see. */
+/** A parse failure that carries the protocol error code the client must see. */
 export class ParseError extends Error {
   constructor(
     readonly code: string,
@@ -46,6 +45,22 @@ function bad(message: string): never {
 
 // ------------------------------------------------------------------ helpers
 
+/**
+ * Parses a JSON object from raw text. Returns undefined for invalid JSON or
+ * a non-object. Callers must not log the parser's error message. It can
+ * contain a slice of the input, and a redemption body carries a proof.
+ */
+export function parseJsonObject(raw: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  return parsed as Record<string, unknown>;
+}
+
 function requireObject(v: unknown, what: string): Record<string, unknown> {
   if (typeof v !== "object" || v === null || Array.isArray(v)) bad(`${what} must be an object`);
   return v as Record<string, unknown>;
@@ -59,10 +74,8 @@ function str(o: Record<string, unknown>, key: string, max: number): string {
 }
 
 /**
- * Integers arrive as JSON numbers and are turned into bigints for CBE. A
- * non-integer, a float, or anything past 2^53 is rejected rather than rounded,
- * because a value that survives rounding differently in two implementations is
- * a signature mismatch waiting to happen.
+ * Reads a JSON number as a bigint for CBE. Rejects floats, negatives and
+ * anything past 2^53. Two implementations can round such values differently.
  */
 function int(o: Record<string, unknown>, key: string): bigint {
   const v = o[key];
@@ -91,6 +104,48 @@ function checkVersion(v: bigint): void {
   if (v !== PROTOCOL_VERSION) {
     throw new ParseError("UNSUPPORTED_VERSION", `protocol version ${v} is not supported`);
   }
+}
+
+/** Reads a 64-byte Ed25519 signature from an envelope field. */
+export function parseSignature(raw: Record<string, unknown>, key = "signature"): Uint8Array {
+  return bytes(raw, key, 64);
+}
+
+// ------------------------------------------------------------ ssh public key
+
+const SSH_ED25519 = "ssh-ed25519";
+/** u32 type length || "ssh-ed25519" || u32 key length || 32 key bytes. */
+const SSH_ED25519_BLOB_LEN = 4 + SSH_ED25519.length + 4 + 32;
+
+/**
+ * Parses an authorized_keys line and returns the wire blob. v1 accepts only
+ * ssh-ed25519 with exactly two fields and no comment. The exact string is
+ * what the host's MAC covers, so nothing is normalized.
+ */
+export function parseSshEd25519Line(line: string): Uint8Array {
+  const parts = line.split(" ");
+  if (parts.length !== 2 || parts[0] !== SSH_ED25519) {
+    bad("ssh_public_key must be a two-field ssh-ed25519 authorized_keys line");
+  }
+  let blob: Uint8Array;
+  try {
+    blob = b64StdDecode(parts[1]);
+  } catch {
+    return bad("ssh_public_key blob is not valid base64");
+  }
+  if (blob.length !== SSH_ED25519_BLOB_LEN) bad("ssh_public_key blob has the wrong length");
+  const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const type = new TextDecoder().decode(blob.subarray(4, 4 + SSH_ED25519.length));
+  if (dv.getUint32(0) !== SSH_ED25519.length || type !== SSH_ED25519) {
+    bad("ssh_public_key blob is not ssh-ed25519");
+  }
+  if (dv.getUint32(4 + SSH_ED25519.length) !== 32) bad("ssh_public_key blob has a bad key length");
+  return blob;
+}
+
+/** OpenSSH SHA256 fingerprint of a key line. Used for audit rows, never the key itself. */
+export async function sshKeyFingerprint(line: string): Promise<string> {
+  return "SHA256:" + b64StdEncodeNoPad(await sha256(parseSshEd25519Line(line)));
 }
 
 // -------------------------------------------------------------- host register
@@ -128,8 +183,23 @@ export function parseHostRegistration(raw: unknown): HostRegistration {
   return m;
 }
 
-export function hostRegistrationFields(m: HostRegistration): Field[] {
-  return [
+/** The JSON form of a registration, as a host sends it and as the public record echoes it. */
+export function serializeHostRegistration(m: HostRegistration): Record<string, unknown> {
+  return {
+    version: Number(m.version),
+    host_id: m.host_id,
+    identity_public_key: b64uEncode(m.identity_public_key),
+    ssh_ca_public_key: m.ssh_ca_public_key,
+    hostname: m.hostname,
+    ssh_port: Number(m.ssh_port),
+    ssh_user: m.ssh_user,
+    timestamp: Number(m.timestamp),
+    nonce: b64uEncode(m.nonce),
+  };
+}
+
+export const canonicalHostRegistration = (m: HostRegistration): Uint8Array =>
+  encode(CTX_HOST_REGISTER, [
     U("version", m.version),
     S("host_id", m.host_id),
     B("identity_public_key", m.identity_public_key),
@@ -139,11 +209,7 @@ export function hostRegistrationFields(m: HostRegistration): Field[] {
     S("ssh_user", m.ssh_user),
     U("timestamp", m.timestamp),
     B("nonce", m.nonce),
-  ];
-}
-
-export const canonicalHostRegistration = (m: HostRegistration): Uint8Array =>
-  encode(CTX_HOST_REGISTER, hostRegistrationFields(m));
+  ]);
 
 // --------------------------------------------------------------- host connect
 
@@ -195,6 +261,17 @@ export function parseGrant(raw: unknown): Grant {
   return m;
 }
 
+export function serializeGrant(g: Grant): Record<string, unknown> {
+  return {
+    version: Number(g.version),
+    host_id: g.host_id,
+    grant_id: g.grant_id,
+    ssh_user: g.ssh_user,
+    created_at: Number(g.created_at),
+    expires_at: Number(g.expires_at),
+  };
+}
+
 export const canonicalGrant = (m: Grant): Uint8Array =>
   encode(CTX_GRANT, [
     U("version", m.version),
@@ -234,11 +311,7 @@ export function parseRedemptionPayload(raw: unknown): RedemptionPayload {
   if (!HOST_ID_RE.test(m.host_id)) bad("malformed host_id");
   if (!GRANT_ID_RE.test(m.grant_id)) bad("malformed grant_id");
   if (!AGENT_ID_RE.test(m.agent_id)) bad("malformed agent_id");
-  // Strict authorized_keys shape. The exact string is what the host's MAC
-  // covers, so it is validated rather than normalized.
-  if (!/^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/.test(m.ssh_public_key)) {
-    bad("ssh_public_key must be a two-field ssh-ed25519 authorized_keys line");
-  }
+  parseSshEd25519Line(m.ssh_public_key);
   return m;
 }
 
@@ -260,6 +333,21 @@ export const canonicalRedemptionSig = (m: RedemptionPayload): Uint8Array =>
 
 export const canonicalRedemptionMac = (m: RedemptionPayload): Uint8Array =>
   encode(CTX_REDEMPTION_MAC, redemptionFields(m));
+
+export interface RedemptionRequest {
+  payload: RedemptionPayload;
+  agent_signature: Uint8Array;
+  proof: Uint8Array;
+}
+
+export function parseRedemptionRequest(raw: unknown): RedemptionRequest {
+  const o = requireObject(raw, "body");
+  return {
+    payload: parseRedemptionPayload(o.payload),
+    agent_signature: bytes(o, "agent_signature", 64),
+    proof: bytes(o, "proof", 32),
+  };
+}
 
 // ------------------------------------------------------------- agent register
 
@@ -297,31 +385,7 @@ export const canonicalAgentRegistration = (m: AgentRegistration): Uint8Array =>
     U("timestamp", m.timestamp),
   ]);
 
-// ------------------------------------------------------------------ envelopes
-
-export interface SignedEnvelope<T> {
-  message: T;
-  signature: Uint8Array;
-}
-
-export function parseSignature(raw: Record<string, unknown>, key = "signature"): Uint8Array {
-  return bytes(raw, key, 64);
-}
-
-export interface RedemptionRequest {
-  payload: RedemptionPayload;
-  agent_signature: Uint8Array;
-  proof: Uint8Array;
-}
-
-export function parseRedemptionRequest(raw: unknown): RedemptionRequest {
-  const o = requireObject(raw, "body");
-  return {
-    payload: parseRedemptionPayload(o.payload),
-    agent_signature: bytes(o, "agent_signature", 64),
-    proof: bytes(o, "proof", 32),
-  };
-}
+// ----------------------------------------------------------------------- time
 
 export function withinSkew(now: number, ts: bigint, skew: number): boolean {
   const t = Number(ts);

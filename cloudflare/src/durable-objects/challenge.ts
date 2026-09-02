@@ -1,27 +1,24 @@
 /**
- * ChallengeDO — one Durable Object per Agent Captcha challenge.
+ * ChallengeDO, one Durable Object per registration challenge.
  *
- * Its only real job is to make consumption atomic: a challenge must be usable
- * exactly once, even if the same answer is submitted from two places at the
- * same instant. A Durable Object gives that for free, which is why this is an
- * object rather than a row somewhere.
+ * Its job is atomic consumption. A challenge is usable exactly once, even
+ * when two submissions arrive at the same instant.
  */
 
 import { DurableObject } from "cloudflare:workers";
 import { ERR, errorResponse, jsonResponse } from "../errors";
-import { b64uEncode } from "../crypto/encoding";
+import { b64uDecode, b64uEncode } from "../crypto/encoding";
 import { verifyPow } from "../captcha";
 import type { Env } from "../env";
 
-/** Challenges are short-lived; a stale one is a replay opportunity, not a convenience. */
+/** A stale challenge is a replay opportunity, so the lifetime is short. */
 const TTL_SECONDS = 600;
 
-/**
- * ~1M hashes: about a second for one agent, real money for a million
- * registrations. Overridable so that tests are not forced to spend a CPU-second
- * per agent to exercise a flow whose cost is the entire point.
- */
+/** About 1M hashes: one second for one agent, real money for a million. */
 const DEFAULT_DIFFICULTY_BITS = 20;
+
+/** Lowest difficulty accepted outside tests. Below this the proof of work is free. */
+const MIN_PRODUCTION_DIFFICULTY_BITS = 16;
 
 interface State {
   challenge_id: string;
@@ -33,11 +30,19 @@ interface State {
 }
 
 export class ChallengeDO extends DurableObject<Env> {
+  /**
+   * Reads POW_DIFFICULTY_BITS. A value below the production floor is used
+   * only when POW_ALLOW_LOW_DIFFICULTY is "1". Any other bad value falls
+   * back to the default.
+   */
   private difficultyBits(): number {
     const raw = this.env.POW_DIFFICULTY_BITS;
     if (!raw) return DEFAULT_DIFFICULTY_BITS;
     const n = Number(raw);
-    return Number.isInteger(n) && n >= 0 && n <= 32 ? n : DEFAULT_DIFFICULTY_BITS;
+    if (!Number.isInteger(n) || n < 0 || n > 32) return DEFAULT_DIFFICULTY_BITS;
+    const lowAllowed = this.env.POW_ALLOW_LOW_DIFFICULTY === "1";
+    if (n < MIN_PRODUCTION_DIFFICULTY_BITS && !lowAllowed) return DEFAULT_DIFFICULTY_BITS;
+    return n;
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -67,8 +72,7 @@ export class ChallengeDO extends DurableObject<Env> {
       consumed_at: null,
     };
     await this.ctx.storage.put("state", state);
-    // The object is useless after expiry; let it clean itself up rather than
-    // accumulating one abandoned object per abandoned registration attempt.
+    // The object is useless after expiry. The alarm deletes it.
     await this.ctx.storage.setAlarm(Date.now() + (TTL_SECONDS + 60) * 1000);
 
     console.log(JSON.stringify({ event: "agent.challenge_created", challenge_id: challengeId }));
@@ -84,11 +88,7 @@ export class ChallengeDO extends DurableObject<Env> {
     );
   }
 
-  /**
-   * Consumes the challenge. The whole read-check-write runs inside
-   * blockConcurrencyWhile so that two simultaneous submissions cannot both see
-   * an unconsumed challenge.
-   */
+  /** Consumes the challenge. The read-check-write runs as one unit. */
   private async consume(request: Request): Promise<Response> {
     const body = (await request.json()) as { pow_nonce?: unknown };
     const powNonce = typeof body.pow_nonce === "string" ? body.pow_nonce : "";
@@ -105,7 +105,7 @@ export class ChallengeDO extends DurableObject<Env> {
         return errorResponse(ERR.CHALLENGE_CONSUMED, "challenge has already been used");
       }
 
-      const prefix = decodePrefix(state.pow_prefix);
+      const prefix = b64uDecode(state.pow_prefix);
       if (!(await verifyPow(prefix, state.difficulty_bits, powNonce))) {
         return errorResponse(ERR.BAD_ANSWER, "proof of work is invalid");
       }
@@ -119,12 +119,4 @@ export class ChallengeDO extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     await this.ctx.storage.deleteAll();
   }
-}
-
-function decodePrefix(s: string): Uint8Array {
-  const padded = s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4);
-  const bin = atob(padded);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }

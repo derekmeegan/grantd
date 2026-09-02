@@ -2,15 +2,26 @@
  * Coordination service behaviour.
  *
  * Two kinds of test live here. The first kind checks that the service routes
- * correctly. The second kind checks that it *cannot* do the things a compromised
- * control plane would want to do — and those matter more, because the product's
- * claim is that this layer being hostile is survivable.
+ * correctly. The second kind checks that it cannot do the things a hostile
+ * control plane wants to do. The second kind matters more.
  */
 
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { b64uDecode, b64uEncode } from "../src/crypto/encoding";
-import { ORIGIN, TestAgent, TestHost, newGrantId, now, randomBytes, solvePow, sshLine } from "./helpers";
+import { hostId as deriveHostId, verifyEd25519 } from "../src/crypto/ids";
+import { canonicalHostConnect, canonicalHostRegistration, parseHostRegistration } from "../src/protocol";
+import {
+  ORIGIN,
+  TestAgent,
+  TestHost,
+  newGrantId,
+  now,
+  randomBytes,
+  sign,
+  solvePow,
+  sshLine,
+} from "./helpers";
 
 /** Frames carry opaque bytes, so a test host encodes its answers the same way. */
 function encodeBody(value: unknown): string {
@@ -26,34 +37,72 @@ async function errCode(res: Response): Promise<string> {
   return body.error?.code ?? "";
 }
 
-/**
- * Stands in for a real signer answering a wrong proof: cheap, immediate, and
- * pointedly not consuming the grant.
- */
-function respondWithBadProof(ws: WebSocket): void {
+type Frame = { t: string; id: string };
+
+/** Answers every redeem.request on the socket with the frames that `reply` returns. */
+function respondWith(ws: WebSocket, reply: (frame: Frame) => unknown[]): void {
   ws.addEventListener("message", (e) => {
-    const frame = JSON.parse(String(e.data));
+    const frame = JSON.parse(String(e.data)) as Frame;
     if (frame.t !== "redeem.request") return;
-    ws.send(
-      JSON.stringify({
-        t: "redeem.response",
-        id: frame.id,
-        status: 401,
-        body_b64: encodeBody({
-          error: { code: "BAD_PROOF", message: "redemption proof does not verify" },
-        }),
-      }),
-    );
+    for (const out of reply(frame)) ws.send(JSON.stringify(out));
+  });
+}
+
+function badProofFrame(id: string): unknown {
+  return {
+    t: "redeem.response",
+    id,
+    status: 401,
+    body_b64: encodeBody({ error: { code: "BAD_PROOF", message: "redemption proof does not verify" } }),
+  };
+}
+
+function issuedFrame(id: string): unknown {
+  return {
+    t: "redeem.response",
+    id,
+    status: 200,
+    body_b64: encodeBody({ certificate: "ssh-ed25519-cert-v01@openssh.com AAAA", user: "ubuntu" }),
+  };
+}
+
+/** A signer that answers a wrong proof: cheap, immediate, and not consuming the grant. */
+function respondWithBadProof(ws: WebSocket): void {
+  respondWith(ws, (f) => [badProofFrame(f.id)]);
+}
+
+async function redeemRaw(host: TestHost, grantId: string, body: string): Promise<Response> {
+  return await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
+    method: "POST",
+    body,
+    headers: { "content-type": "application/json" },
   });
 }
 
 async function redeem(host: TestHost, agent: TestAgent, grantId: string): Promise<Response> {
-  return await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-    method: "POST",
-    body: JSON.stringify(await agent.redemptionBody(host.hostId, grantId, randomBytes(32))),
-    headers: { "content-type": "application/json" },
-  });
+  const body = await agent.redemptionBody(host.hostId, grantId, randomBytes(32));
+  return await redeemRaw(host, grantId, JSON.stringify(body));
 }
+
+/** A registered host with one published grant. */
+async function hostWithGrant(): Promise<{ host: TestHost; grantId: string }> {
+  const host = await TestHost.create();
+  await host.register();
+  const grantId = newGrantId();
+  await host.publishGrant(grantId);
+  return { host, grantId };
+}
+
+/** Records whether a redeem.request ever arrives on the socket. */
+function wakeDetector(ws: WebSocket): () => boolean {
+  let woken = false;
+  ws.addEventListener("message", (e) => {
+    if (JSON.parse(String(e.data)).t === "redeem.request") woken = true;
+  });
+  return () => woken;
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 100));
 
 describe("public surface", () => {
   it("serves protocol documentation at the root", async () => {
@@ -78,13 +127,20 @@ describe("public surface", () => {
     const text = await res.text();
     expect(text).toContain(host.hostId);
     expect(text).toContain(grantId);
-    // The instructions must tell the reader to keep the fragment local.
     expect(text).toContain("Do not send the secret");
   });
 
   it("rejects malformed identifiers", async () => {
     expect((await SELF.fetch(`${ORIGIN}/g/nope/also-nope`)).status).toBe(400);
     expect((await SELF.fetch(`${ORIGIN}/v1/hosts/h_short`)).status).toBe(400);
+  });
+
+  it("answers HOST_NOT_FOUND for an unregistered host", async () => {
+    const host = await TestHost.create();
+    expect(await errCode(await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}`))).toBe("HOST_NOT_FOUND");
+    expect(
+      await errCode(await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${newGrantId()}`)),
+    ).toBe("HOST_NOT_FOUND");
   });
 });
 
@@ -100,8 +156,46 @@ describe("host registration", () => {
     expect(body.host_id).toBe(host.hostId);
     expect(body.ssh_user).toBe("ubuntu");
     expect(body.connected).toBe(false);
-    // A public record must contain nothing private.
     expect(JSON.stringify(body)).not.toContain("PRIVATE");
+  });
+
+  it("echoes the last accepted registration with a signature a visitor can verify", async () => {
+    const host = await TestHost.create();
+    expect((await host.register()).status).toBe(201);
+    // A second registration updates the record. The echo must be the newest one.
+    const update = await host.registrationBody({ hostname: "moved.example.com" });
+    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}`, {
+      method: "PUT",
+      body: JSON.stringify(update),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(200);
+
+    const body = (await (await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}`)).json()) as {
+      registration: Record<string, unknown>;
+      signature: string;
+      hostname: string;
+    };
+    expect(body.hostname).toBe("moved.example.com");
+    expect(body.registration).toEqual((update as { registration: unknown }).registration);
+    expect(Object.keys(body.registration).sort()).toEqual([
+      "host_id",
+      "hostname",
+      "identity_public_key",
+      "nonce",
+      "ssh_ca_public_key",
+      "ssh_port",
+      "ssh_user",
+      "timestamp",
+      "version",
+    ]);
+
+    // Verify the way a visitor does: from the parsed fields, under the identity key.
+    const reg = parseHostRegistration(body.registration);
+    expect(await deriveHostId(reg.identity_public_key)).toBe(host.hostId);
+    expect(
+      await verifyEd25519(reg.identity_public_key, canonicalHostRegistration(reg), b64uDecode(body.signature)),
+    ).toBe(true);
   });
 
   it("rejects a registration whose host_id is not the hash of its key", async () => {
@@ -120,8 +214,7 @@ describe("host registration", () => {
   it("rejects a tampered registration field", async () => {
     const host = await TestHost.create();
     const body = (await host.registrationBody()) as Record<string, unknown>;
-    // Exactly the change a hostile service would make: point the agent at a
-    // machine it controls.
+    // The change a hostile service makes: point the agent at its own machine.
     (body.registration as Record<string, unknown>).hostname = "attacker.example.com";
     const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}`, {
       method: "PUT",
@@ -169,15 +262,11 @@ describe("host registration", () => {
 
 describe("grant publication", () => {
   it("accepts host-signed grant metadata and serves it publicly", async () => {
-    const host = await TestHost.create();
-    await host.register();
-    const grantId = newGrantId();
-    expect((await host.publishGrant(grantId)).status).toBe(201);
-
+    const { host, grantId } = await hostWithGrant();
     const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    // Published metadata must carry no secret and no derivative of one.
+    // Published metadata carries no secret and no derivative of one.
     expect(Object.keys(body.grant as object).sort()).toEqual([
       "created_at",
       "expires_at",
@@ -193,7 +282,6 @@ describe("grant publication", () => {
     const impostor = await TestHost.create();
     await host.register();
     const grantId = newGrantId();
-    // A grant signed by the wrong key, published under the right host id.
     const body = (await impostor.grantBody(grantId)) as Record<string, unknown>;
     (body.grant as Record<string, unknown>).host_id = host.hostId;
     const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}`, {
@@ -225,6 +313,19 @@ describe("grant publication", () => {
     const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}`, {
       method: "PUT",
       body: JSON.stringify(await host.grantBody(grantId, 9 * 3600)),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a grant created in the future", async () => {
+    const host = await TestHost.create();
+    await host.register();
+    const grantId = newGrantId();
+    // Signed and well formed. Only the creation time is wrong: ten years out.
+    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}`, {
+      method: "PUT",
+      body: JSON.stringify(await host.grantBody(grantId, 600, now() + 10 * 365 * 86400)),
       headers: { "content-type": "application/json" },
     });
     expect(res.status).toBe(400);
@@ -273,51 +374,70 @@ describe("rendezvous", () => {
     const impostor = await TestHost.create();
     await host.register();
     await impostor.register();
-    // Signature is valid, but for the impostor's own host id; presenting it on
-    // the victim's connect path must fail.
+    // A valid signature from the impostor's key over the victim's connect path.
     const ts = now();
     const nonce = randomBytes(16);
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/connect`, {
+    const path = `/v1/hosts/${host.hostId}/connect`;
+    const signature = await sign(
+      impostor.identity,
+      canonicalHostConnect({ version: 1n, host_id: host.hostId, path, timestamp: BigInt(ts), nonce }),
+    );
+    const res = await SELF.fetch(`${ORIGIN}${path}`, {
       headers: {
         Upgrade: "websocket",
         "X-Grantd-Timestamp": String(ts),
-        "X-Grantd-Nonce": "AAAAAAAAAAAAAAAAAAAAAA",
-        "X-Grantd-Signature": "A".repeat(86),
+        "X-Grantd-Nonce": b64uEncode(nonce),
+        "X-Grantd-Signature": b64uEncode(signature),
       },
     });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    void impostor;
-    void nonce;
+    expect(await errCode(res)).toBe("BAD_SIGNATURE");
+  });
+
+  it("replaces the first connection with the second and routes redemptions to it", async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const first = await host.connect();
+    const firstWoken = wakeDetector(first);
+    const firstClosed = new Promise<number>((resolve) => {
+      first.addEventListener("close", (e) => resolve(e.code));
+    });
+
+    const second = await host.connect();
+    expect(await firstClosed).toBe(1012);
+    respondWith(second, (f) => [issuedFrame(f.id)]);
+
+    const res = await redeem(host, agent, grantId);
+    expect(res.status).toBe(200);
+    await settle();
+    expect(firstWoken()).toBe(false);
+    second.close();
+  });
+
+  it("fails a pending redemption with HOST_OFFLINE when the socket closes", { timeout: 10_000 }, async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const ws = await host.connect();
+    // The daemon dies mid-request. The redeemer must not wait for the full timeout.
+    ws.addEventListener("message", (e) => {
+      if (JSON.parse(String(e.data)).t === "redeem.request") ws.close(1001, "going away");
+    });
+    expect(await errCode(await redeem(host, agent, grantId))).toBe("HOST_OFFLINE");
   });
 });
 
 describe("redemption routing", () => {
   it("returns HOST_OFFLINE when no daemon is connected", async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const agent = await TestAgent.registered();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
-
-    const secret = randomBytes(32);
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(await agent.redemptionBody(host.hostId, grantId, secret)),
-      headers: { "content-type": "application/json" },
-    });
-    expect(await errCode(res)).toBe("HOST_OFFLINE");
+    expect(await errCode(await redeem(host, agent, grantId))).toBe("HOST_OFFLINE");
   });
 
   it("forwards the redemption envelope to the host byte for byte", async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const agent = await TestAgent.registered();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
     const ws = await host.connect();
 
-    const secret = randomBytes(32);
-    const body = await agent.redemptionBody(host.hostId, grantId, secret);
+    const body = await agent.redemptionBody(host.hostId, grantId, randomBytes(32));
     const sentJson = JSON.stringify(body);
 
     let forwarded: Record<string, unknown> | undefined;
@@ -325,173 +445,141 @@ describe("redemption routing", () => {
       const frame = JSON.parse(String(e.data));
       if (frame.t !== "redeem.request") return;
       forwarded = decodeBody(frame.body_b64) as Record<string, unknown>;
-      ws.send(
-        JSON.stringify({
-          t: "redeem.response",
-          id: frame.id,
-          status: 200,
-          body_b64: encodeBody({
-            certificate: "ssh-ed25519-cert-v01@openssh.com AAAA",
-            user: "ubuntu",
-          }),
-        }),
-      );
+      ws.send(JSON.stringify(issuedFrame(frame.id)));
     });
 
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: sentJson,
-      headers: { "content-type": "application/json" },
-    });
+    const res = await redeemRaw(host, grantId, sentJson);
     expect(res.status).toBe(200);
     expect((await res.json()) as Record<string, unknown>).toMatchObject({ user: "ubuntu" });
 
-    // The host must verify the bytes the agent signed. If the service
-    // re-serialized or reordered anything, a proof over the original payload
-    // could still verify while a substituted field slipped through.
+    // The host must verify the bytes the agent signed. A re-serialization
+    // here lets a substituted field slip past a proof over the original.
     expect(forwarded).toEqual(JSON.parse(sentJson));
     ws.close();
   });
 
   it("relays a 64-bit certificate serial without losing precision", async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const agent = await TestAgent.registered();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
     const ws = await host.connect();
 
-    // A certificate serial is a random uint64. JSON.parse turns that into a
-    // float64, and float64 cannot represent it — the value comes back rounded.
-    // Relaying the host's answer as opaque bytes is what keeps the serial in
-    // the response equal to the serial actually in the certificate.
+    // A serial is a random uint64. float64 cannot hold it. Opaque relay keeps it exact.
     const serial = "5177954190189569593";
-    ws.addEventListener("message", (e) => {
-      const frame = JSON.parse(String(e.data));
-      if (frame.t !== "redeem.request") return;
-      ws.send(
-        JSON.stringify({
-          t: "redeem.response",
-          id: frame.id,
-          status: 200,
-          body_b64: b64uEncode(
-            new TextEncoder().encode(`{"serial":${serial},"user":"ubuntu"}`),
-          ),
-        }),
-      );
-    });
+    respondWith(ws, (f) => [
+      {
+        t: "redeem.response",
+        id: f.id,
+        status: 200,
+        body_b64: b64uEncode(new TextEncoder().encode(`{"serial":${serial},"user":"ubuntu"}`)),
+      },
+    ]);
 
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(await agent.redemptionBody(host.hostId, grantId, randomBytes(32))),
-      headers: { "content-type": "application/json" },
-    });
+    const res = await redeem(host, agent, grantId);
     expect(res.status).toBe(200);
-    // Compared as text, because parsing it here would reintroduce the very
-    // rounding the test is about.
+    // Compared as text. Parsing it here reintroduces the rounding.
     expect(await res.text()).toContain(`"serial":${serial}`);
     ws.close();
   });
 
   it("relays the host's rejection code rather than masking it", async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const agent = await TestAgent.registered();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
     const ws = await host.connect();
+    respondWithBadProof(ws);
 
-    ws.addEventListener("message", (e) => {
-      const frame = JSON.parse(String(e.data));
-      if (frame.t !== "redeem.request") return;
-      ws.send(
-        JSON.stringify({
-          t: "redeem.response",
-          id: frame.id,
-          status: 401,
-          body_b64: encodeBody({
-            error: { code: "BAD_PROOF", message: "redemption proof does not verify" },
-          }),
-        }),
-      );
-    });
-
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(await agent.redemptionBody(host.hostId, grantId, randomBytes(32))),
-      headers: { "content-type": "application/json" },
-    });
+    const res = await redeem(host, agent, grantId);
     expect(res.status).toBe(401);
     expect(await errCode(res)).toBe("BAD_PROOF");
     ws.close();
   });
 
   it("rejects a redemption whose agent signature does not verify", async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const agent = await TestAgent.registered();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
-
     const body = await agent.redemptionBody(host.hostId, grantId, randomBytes(32));
     // Substituting the SSH key is the canonical attack. It breaks the agent
-    // signature here, and would break the grant proof on the host even if it
-    // did not.
+    // signature here, and the grant proof on the host.
     const attacker = await TestAgent.create();
     (body.payload as Record<string, unknown>).ssh_public_key = sshLine(attacker.sshKey.publicKey);
+    expect(await errCode(await redeemRaw(host, grantId, JSON.stringify(body)))).toBe("BAD_SIGNATURE");
+  });
 
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: { "content-type": "application/json" },
+  it("rejects a redemption that borrows a registered agent_id with a stranger's key", async () => {
+    const { host, grantId } = await hostWithGrant();
+    const victim = await TestAgent.registered();
+    const stranger = await TestAgent.create();
+    const ws = await host.connect();
+    const woken = wakeDetector(ws);
+
+    // Signed with the stranger's key, claiming the victim's id. The signature
+    // verifies under the key in the payload. Only the derivation check stops it.
+    const body = await stranger.redemptionBody(host.hostId, grantId, randomBytes(32), {
+      agentId: victim.agentId,
     });
-    expect(await errCode(res)).toBe("BAD_SIGNATURE");
+    expect(await errCode(await redeemRaw(host, grantId, JSON.stringify(body)))).toBe("ID_MISMATCH");
+    await settle();
+    expect(woken()).toBe(false);
+    ws.close();
   });
 
   it("rejects a redemption addressed to a different host", async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const other = await TestHost.create();
-    const agent = await TestAgent.registered();
-    await host.register();
     await other.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
-
+    const agent = await TestAgent.registered();
     const body = await agent.redemptionBody(other.hostId, grantId, randomBytes(32));
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: { "content-type": "application/json" },
-    });
-    expect(await errCode(res)).toBe("ID_MISMATCH");
+    expect(await errCode(await redeemRaw(host, grantId, JSON.stringify(body)))).toBe("ID_MISMATCH");
   });
 
   it("rejects a redemption for an unpublished grant", async () => {
     const host = await TestHost.create();
-    const agent = await TestAgent.registered();
     await host.register();
-    const grantId = newGrantId();
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(await agent.redemptionBody(host.hostId, grantId, randomBytes(32))),
-      headers: { "content-type": "application/json" },
-    });
-    expect(await errCode(res)).toBe("GRANT_NOT_FOUND");
+    const agent = await TestAgent.registered();
+    expect(await errCode(await redeem(host, agent, newGrantId()))).toBe("GRANT_NOT_FOUND");
+  });
+
+  it("rejects a malformed body and a missing proof before waking the host", async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const ws = await host.connect();
+    const woken = wakeDetector(ws);
+
+    expect((await redeemRaw(host, grantId, "{not json")).status).toBe(400);
+    expect((await redeemRaw(host, grantId, "null")).status).toBe(400);
+    expect((await redeemRaw(host, grantId, "[]")).status).toBe(400);
+
+    const body = await agent.redemptionBody(host.hostId, grantId, randomBytes(32));
+    delete body.proof;
+    expect(await errCode(await redeemRaw(host, grantId, JSON.stringify(body)))).toBe("BAD_REQUEST");
+
+    await settle();
+    expect(woken()).toBe(false);
+    ws.close();
+  });
+
+  it("rejects an ssh_public_key that is not an ssh-ed25519 blob", async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const lines = [
+      "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7",
+      "ssh-ed25519 AAAA",
+      "ssh-ed25519 " + btoa("not a wire blob at all, just text"),
+      agent.sshPublicKeyLine + " comment",
+    ];
+    for (const sshLineValue of lines) {
+      const body = await agent.redemptionBody(host.hostId, grantId, randomBytes(32), { sshLine: sshLineValue });
+      expect(await errCode(await redeemRaw(host, grantId, JSON.stringify(body)))).toBe("BAD_REQUEST");
+    }
   });
 
   it("caps redemption attempts per grant, which an edge rule keyed on IP cannot do", { timeout: 60_000 }, async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const agent = await TestAgent.registered();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
     const ws = await host.connect();
     respondWithBadProof(ws);
 
-    // A wrong proof does not consume the grant — that is deliberate, so that
-    // guessing cannot burn a legitimate capability. The cost it does impose is
-    // waking the customer's machine, and grant_id lives in the request body
-    // where a WAF rule cannot see it. Hence a limiter keyed on the grant.
+    // A wrong proof does not consume the grant. It does wake the machine, and
+    // grant_id is in the body where a WAF rule cannot see it.
     const codes: string[] = [];
     for (let i = 0; i < 14; i++) {
       codes.push(await errCode(await redeem(host, agent, grantId)));
@@ -503,7 +591,7 @@ describe("redemption routing", () => {
   });
 
   // 70 sequential redemptions through real Durable Objects. The default 5s
-  // timeout is a local-machine assumption and fails on a slower CI runner.
+  // timeout fails on a slow CI runner.
   it("caps redemption attempts per host across many grants", { timeout: 120_000 }, async () => {
     const host = await TestHost.create();
     const agent = await TestAgent.registered();
@@ -511,10 +599,8 @@ describe("redemption routing", () => {
     const ws = await host.connect();
     respondWithBadProof(ws);
 
-    // Spreading the flood across grants defeats the per-grant limiter, and
-    // spreading it across IPs would defeat an edge rule. The Durable Object is
-    // the only place with a consistent per-host view, so the last line lives
-    // there.
+    // Spreading over grants defeats the per-grant limiter. Spreading over IPs
+    // defeats an edge rule. The Durable Object has the per-host view.
     const grants: string[] = [];
     for (let g = 0; g < 7; g++) {
       const id = newGrantId();
@@ -534,57 +620,76 @@ describe("redemption routing", () => {
   });
 
   it("refuses an unregistered agent", async () => {
-    const host = await TestHost.create();
-    // Deliberately not registered: this is the case that used to slip through.
+    const { host, grantId } = await hostWithGrant();
     const stranger = await TestAgent.create();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
-
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(await stranger.redemptionBody(host.hostId, grantId, randomBytes(32))),
-      headers: { "content-type": "application/json" },
-    });
-    expect(await errCode(res)).toBe("AGENT_NOT_FOUND");
+    expect(await errCode(await redeem(host, stranger, grantId))).toBe("AGENT_NOT_FOUND");
   });
 
   it("refuses an unregistered agent before waking the host", async () => {
-    const host = await TestHost.create();
+    const { host, grantId } = await hostWithGrant();
     const stranger = await TestAgent.create();
-    await host.register();
-    const grantId = newGrantId();
-    await host.publishGrant(grantId);
     const ws = await host.connect();
+    const woken = wakeDetector(ws);
 
-    // The whole point of checking registration is that it happens before the
-    // customer's machine is disturbed. If the frame still arrives, the check is
-    // costing a round trip and buying nothing.
-    let woken = false;
-    ws.addEventListener("message", (e) => {
-      if (JSON.parse(String(e.data)).t === "redeem.request") woken = true;
-    });
-
-    await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: JSON.stringify(await stranger.redemptionBody(host.hostId, grantId, randomBytes(32))),
-      headers: { "content-type": "application/json" },
-    });
-    await new Promise((r) => setTimeout(r, 100));
-    expect(woken).toBe(false);
+    await redeem(host, stranger, grantId);
+    await settle();
+    expect(woken()).toBe(false);
     ws.close();
   });
 
   it("rejects an oversized body before parsing it", async () => {
     const host = await TestHost.create();
     await host.register();
-    const grantId = newGrantId();
-    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}/grants/${grantId}/redeem`, {
-      method: "POST",
-      body: "x".repeat(20000),
-      headers: { "content-type": "application/json" },
-    });
+    const res = await redeemRaw(host, newGrantId(), "x".repeat(20000));
     expect(res.status).toBe(413);
+  });
+});
+
+describe("hostile host frames", () => {
+  it("answers INTERNAL, not a hang, for a response with an impossible status", { timeout: 10_000 }, async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const ws = await host.connect();
+    respondWith(ws, (f) => [{ t: "redeem.response", id: f.id, status: 1000, body_b64: encodeBody({}) }]);
+    const res = await redeem(host, agent, grantId);
+    expect(res.status).toBe(500);
+    expect(await errCode(res)).toBe("INTERNAL");
+    ws.close();
+  });
+
+  it("answers INTERNAL for a response whose body is not base64url", { timeout: 10_000 }, async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const ws = await host.connect();
+    respondWith(ws, (f) => [{ t: "redeem.response", id: f.id, status: 200, body_b64: "not base64!!" }]);
+    const res = await redeem(host, agent, grantId);
+    expect(await errCode(res)).toBe("INTERNAL");
+    ws.close();
+  });
+
+  it("drops a response for an unknown request id and still delivers the right one", async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const ws = await host.connect();
+    respondWith(ws, (f) => [badProofFrame("no-such-request"), issuedFrame(f.id)]);
+    const res = await redeem(host, agent, grantId);
+    expect(res.status).toBe(200);
+    ws.close();
+  });
+
+  it("drops unknown frame types", async () => {
+    const { host, grantId } = await hostWithGrant();
+    const agent = await TestAgent.registered();
+    const ws = await host.connect();
+    respondWith(ws, (f) => [
+      { t: "exec", id: f.id, cmd: "rm -rf /" },
+      "this is not even json",
+      { t: 42 },
+      issuedFrame(f.id),
+    ]);
+    const res = await redeem(host, agent, grantId);
+    expect(res.status).toBe(200);
+    ws.close();
   });
 });
 
@@ -595,7 +700,6 @@ describe("agent registration", () => {
     const ch = (await res.json()) as Record<string, unknown>;
     expect(ch).toHaveProperty("challenge_id");
     expect(ch).toHaveProperty("pow");
-    // There is no question, and nothing that could leak an expected answer.
     expect(ch).not.toHaveProperty("question");
     expect(ch).not.toHaveProperty("answer");
     expect(JSON.stringify(ch)).not.toContain("answer");
@@ -610,13 +714,7 @@ describe("agent registration", () => {
     // The record is public and holds nothing but a public key.
     const body = (await rec.json()) as Record<string, unknown>;
     expect(body.agent_id).toBe(a.agentId);
-    expect(Object.keys(body).sort()).toEqual([
-      "agent_id",
-      "captcha_version",
-      "created_at",
-      "last_seen_at",
-      "public_key",
-    ]);
+    expect(Object.keys(body).sort()).toEqual(["agent_id", "created_at", "last_seen_at", "public_key"]);
   });
 
   it("rejects a registration with a wrong proof of work", async () => {
@@ -629,6 +727,16 @@ describe("agent registration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(await errCode(res)).toBe("BAD_ANSWER");
+  });
+
+  it("rejects a malformed challenge_id without touching a challenge object", async () => {
+    const a = await TestAgent.create();
+    const res = await SELF.fetch(`${ORIGIN}/v1/agents`, {
+      method: "POST",
+      body: JSON.stringify(await a.registrationBody("../../etc/passwd", "0")),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
   });
 
   it("rejects a registration whose agent_id is not the hash of its key", async () => {
@@ -647,7 +755,7 @@ describe("agent registration", () => {
       body: JSON.stringify(body),
       headers: { "content-type": "application/json" },
     });
-    expect(["ID_MISMATCH", "BAD_SIGNATURE"]).toContain(await errCode(res));
+    expect(await errCode(res)).toBe("ID_MISMATCH");
   });
 
   it("consumes a challenge exactly once", async () => {
@@ -666,8 +774,7 @@ describe("agent registration", () => {
     });
     expect(r1.status).toBe(201);
 
-    // Reusing a solved challenge for a second identity must fail, or one proof
-    // of work would mint unlimited registrations.
+    // One proof of work must not mint two registrations.
     const second = await TestAgent.create();
     const r2 = await SELF.fetch(`${ORIGIN}/v1/agents`, {
       method: "POST",

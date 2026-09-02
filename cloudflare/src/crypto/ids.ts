@@ -1,4 +1,4 @@
-/** Identifier derivation and Ed25519 verification — protocol/v1.md §3. */
+/** Identifier derivation and Ed25519 verification, protocol/v1.md section 3. */
 
 import { base32Encode } from "./encoding";
 
@@ -9,11 +9,14 @@ export const AGENT_ID_RE = /^a_[a-z2-7]{32}$/;
 export const GRANT_ID_RE = /^g_[a-z2-7]{16}$/;
 export const CHALLENGE_ID_RE = /^c_[a-z2-7]{26}$/;
 
-/** SHA-256 truncated to the 20 bytes that base32 to exactly 32 characters. */
+export async function sha256(data: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", data as BufferSource));
+}
+
+/** SHA-256 of the raw key, truncated to 20 bytes. 20 bytes base32 to 32 characters. */
 async function idMaterial(pub: Uint8Array): Promise<Uint8Array> {
   if (pub.length !== 32) throw new Error("public key must be 32 raw ed25519 bytes");
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", pub as BufferSource));
-  return digest.slice(0, 20);
+  return (await sha256(pub)).slice(0, 20);
 }
 
 export async function hostId(pub: Uint8Array): Promise<string> {
@@ -24,16 +27,11 @@ export async function agentId(pub: Uint8Array): Promise<string> {
   return "a_" + base32Encode(await idMaterial(pub));
 }
 
-export async function sha256(data: Uint8Array): Promise<Uint8Array> {
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", data as BufferSource));
-}
-
 /**
  * Verify an Ed25519 signature over canonical bytes.
  *
- * Returns false rather than throwing on malformed keys or signatures: a peer
- * sending garbage is an authentication failure, not an internal error, and
- * treating the two the same is how a 500 leaks the difference.
+ * Returns false instead of throwing on a malformed key or signature. A peer
+ * that sends garbage is an authentication failure, not an internal error.
  */
 export async function verifyEd25519(
   pub: Uint8Array,
@@ -56,7 +54,7 @@ export async function verifyEd25519(
   }
 }
 
-/** Random identifier for a challenge: "c_" plus 16 random bytes in base32. */
+/** Random challenge identifier: "c_" plus 16 random bytes in base32. */
 export function newChallengeId(): string {
   const raw = new Uint8Array(16);
   crypto.getRandomValues(raw);

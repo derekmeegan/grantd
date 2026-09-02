@@ -1,7 +1,8 @@
-/** Byte encodings the protocol uses. All of them are exact: nothing here
- * tolerates padding, whitespace, or an alternate alphabet, because a decoder
- * that accepts two spellings of the same value hands an attacker a way to
- * change bytes without changing meaning. */
+/**
+ * Byte encodings the protocol uses. Every decoder here is exact. A decoder
+ * that accepts two spellings of one value lets a peer change bytes without
+ * changing meaning.
+ */
 
 const B32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 
@@ -24,7 +25,7 @@ export function base32Encode(bytes: Uint8Array): string {
   return out;
 }
 
-/** base64url without padding — the only binary-in-JSON encoding v1 uses. */
+/** base64url without padding. This is the only binary-in-JSON encoding in v1. */
 export function b64uEncode(bytes: Uint8Array): string {
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
@@ -35,8 +36,7 @@ export class DecodeError extends Error {}
 
 /**
  * Strict base64url decode. Rejects padding, the standard alphabet, and any
- * input that does not re-encode to itself — which is what stops a peer from
- * submitting two distinct strings that decode to the same bytes.
+ * input that does not re-encode to itself.
  */
 export function b64uDecode(s: string): Uint8Array {
   if (typeof s !== "string" || s.length === 0) {
@@ -60,6 +60,29 @@ export function b64uDecode(s: string): Uint8Array {
   return out;
 }
 
+/** Standard base64 decode, as used in an authorized_keys line. Throws DecodeError. */
+export function b64StdDecode(s: string): Uint8Array {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(s) || s.length % 4 !== 0) {
+    throw new DecodeError("expected standard base64");
+  }
+  let bin: string;
+  try {
+    bin = atob(s);
+  } catch {
+    throw new DecodeError("expected standard base64");
+  }
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Standard base64 encode with padding stripped, as in an OpenSSH fingerprint. */
+export function b64StdEncodeNoPad(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/=+$/, "");
+}
+
 export function hexEncode(bytes: Uint8Array): string {
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
@@ -73,11 +96,4 @@ export function hexDecode(s: string): Uint8Array {
   const out = new Uint8Array(s.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
   return out;
-}
-
-export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
 }
