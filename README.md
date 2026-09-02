@@ -38,12 +38,17 @@ Send that URL to the recipient over any channel you trust.
 
 ```sh
 curl -sO https://grantd.example.workers.dev/redeem.sh
-sh redeem.sh 'https://grantd.example.workers.dev/g/h_ubk4.../g_4mmh...#uJN2fx...'
+GRANTD_CAPABILITY='https://grantd.example.workers.dev/g/h_ubk4.../g_4mmh...#uJN2fx...' sh redeem.sh
 ```
 
-It generates a throwaway SSH key, registers an identity, redeems the
-capability, writes a certificate, and prints the `ssh` command. Thirty minutes
-later the certificate expires and there is nothing to revoke.
+It verifies the host's signed registration, generates a throwaway SSH key,
+registers an identity, redeems the capability, checks the certificate against
+the host's CA, and prints the `ssh` command. Thirty minutes later the
+certificate expires and there is nothing to revoke.
+
+The URL can also be passed as an argument. On a shared machine prefer the
+variable or stdin (`sh redeem.sh -`), because other users can read command
+line arguments.
 
 ## Why
 
@@ -104,10 +109,24 @@ hour later.
 
 A compromised coordination plane — Workers, Durable Objects, deployment
 credentials, all of it — cannot fabricate a grant, extend an expiry, substitute
-an SSH key, change which account the certificate is for, or cause a second
-certificate to be issued. Each of those is a test in
+an SSH key, change which account the certificate is for, cause a second
+certificate to be issued, or send the visitor to a machine the host did not
+name. Each of those is a test in
 [`go/tests/adversarial`](go/tests/adversarial), run against a service written to
 be actively malicious.
+
+The visitor trusts the service for nothing. The host id in the capability URL
+is a hash of the host's identity key, so the redeemer fetches the host's signed
+registration, verifies it against that id, and takes the hostname, port, user,
+and SSH CA from the signed record. The certificate it receives must come from
+that CA, for its own key, for that user.
+
+**What the service is trusted for.** Two things, and the README is explicit
+about both. It delivers `install` and `redeem.sh` when you fetch them from the
+service origin, and it routes traffic. If you do not want to trust it for code
+delivery, take both scripts from a pinned release of this repository instead.
+The installer then verifies every binary it runs against the release signature
+embedded in it.
 
 ## Install
 
@@ -119,11 +138,14 @@ sudo bash install --origin https://grantd.example.workers.dev \
   --ssh-user <an unprivileged account> --hostname <the address visitors dial>
 ```
 
-The installer verifies the release signature and every artifact hash before it
-runs anything, refuses to start if `sshd -t` already fails, gates every `sshd`
-reload on `sshd -t`, and restores the previous SSH configuration if any step
-fails. Bricking SSH on a remote machine is the worst thing this software could
-do, so that path is the most heavily tested one in the repository.
+Fetching `install` from the service means trusting the service to deliver
+that one script. If that is not acceptable, use
+[`install/install.sh`](install/install.sh) from a tagged release of this
+repository. Either way, the script verifies the release signature and every
+binary hash before it runs anything, refuses to start if `sshd -t` already
+fails, gates every `sshd` reload on `sshd -t`, and restores the previous SSH
+configuration if any step fails. The signed manifest also binds the release
+version, so an origin cannot serve an older release under a newer name.
 
 `root` cannot be enrolled. A visiting agent's blast radius is bounded by the
 account you choose, and enrolling `root` removes the bound.
@@ -189,8 +211,12 @@ Stated as invariants, each one tested:
 6. Grants are single-use, expiry is enforced by the host, and the host is
    authoritative over its own copy of every field.
 7. The network-facing daemon cannot read either private key. It runs as a
-   separate user, in a namespace with no network, and can ask the signer for
-   exactly four things — none of which is "sign this".
+   separate user with `/etc/grantd`, the signer's state, and the owner socket
+   hidden from it. The daemon socket has no route that creates a grant or
+   signs arbitrary bytes. The signer itself runs with no network at all.
+8. The visitor accepts only a hostname, port, user, and certificate that the
+   host signed, either directly (the registration) or through its CA (the
+   certificate). A compromised service cannot redirect a visitor.
 
 The rendezvous protocol has five message types and no generic RPC frame. There
 is no message that carries a command, a path, or a filename, and there will not
@@ -256,8 +282,9 @@ reachability. No relaying, no session recording, no command restrictions, no
 Windows.
 
 The protocol is frozen and the security model is tested against a deliberately
-hostile coordination service. It has not had an external security review — worth
-knowing before you point it at something that matters.
+hostile coordination service. It has had one internal review, whose findings
+are fixed in this tree, and no external security review — worth knowing before
+you point it at something that matters.
 
 Start with [`protocol/v1.md`](protocol/v1.md) — the whole security argument is
 there. Then [`go/signer/redeem.go`](go/signer/redeem.go), the only code path

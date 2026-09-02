@@ -1,14 +1,18 @@
 name: ci
 
-# The interesting job here is `native-amd64`. Everything else runs in containers
-# or emulation, which is how a locale bug that corrupted every signature on
-# Ubuntu survived six green test suites. A GitHub-hosted runner is a real amd64
-# VM with a real kernel, real systemd and real sshd — so the installer is run
-# directly on the machine, not inside anything.
+# The `native-amd64` job is the important one. The other suites run in
+# containers or under emulation. A locale bug that corrupted every signature on
+# Ubuntu survived six green suites that way. A GitHub-hosted runner is a real
+# amd64 VM with a real kernel, real systemd and real sshd, so the installer runs
+# directly on the machine.
 #
-# That is also the only free way to test the systemd sandbox on amd64: user-mode
+# It is also the only free way to test the systemd sandbox on amd64. User-mode
 # qemu cannot create a private network namespace, so the local emulated run
-# reports that assertion as skipped. Here it actually executes.
+# reports that assertion as skipped. Here it runs.
+#
+# `native-amd64` installs the published release named by GRANTD_VERSION, not
+# the Go code in the checkout. That release must carry a signed VERSION file,
+# or the installer refuses it.
 
 on:
   push:
@@ -21,16 +25,20 @@ on:
         required: false
         default: https://grantd.derekmeegan.workers.dev
 
+permissions:
+  contents: read
+
 env:
   GRANTD_ORIGIN: ${{ github.event.inputs.origin || 'https://grantd.derekmeegan.workers.dev' }}
-  GRANTD_VERSION: v0.1.0
+  # Actions are pinned to commit hashes. Update the hash and the comment together.
+  GRANTD_VERSION: v0.2.0
 
 jobs:
   go:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.24'
           cache-dependency-path: go/go.sum
@@ -42,8 +50,8 @@ jobs:
         run: go test ./... -timeout 10m
       - name: the committed vectors match what the generator produces
         working-directory: go
-        # A vector file edited by hand, or left stale after a protocol change,
-        # would make every conformance test agree with the wrong answer.
+        # A vector file edited by hand, or stale after a protocol change, makes
+        # every conformance test agree with the wrong answer.
         run: |
           go run ./cmd/protocol-vectors /tmp/regen.json
           diff -u ../protocol/test-vectors/v1.json /tmp/regen.json
@@ -54,8 +62,8 @@ jobs:
       run:
         working-directory: cloudflare
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -64,11 +72,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-  # The gap this whole file exists to close.
   native-amd64:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: confirm this is a real amd64 machine, not a container
         run: |
@@ -78,12 +85,12 @@ jobs:
           echo "virt:   $(systemd-detect-virt || true)"
           . /etc/os-release && echo "os:     $PRETTY_NAME"
           test "$(uname -m)" = "x86_64"
-          # Not a container: the sandbox assertions below are only meaningful on
-          # a machine where systemd can actually build namespaces.
+          # The sandbox assertions below only mean something on a machine where
+          # systemd can build namespaces.
           #
-          # systemd-detect-virt prints "none" *and* exits non-zero when there is
-          # no container, so `|| echo none` would append a second "none" and the
-          # comparison would never match.
+          # systemd-detect-virt prints "none" and exits non-zero when there is
+          # no container. `|| echo none` appends a second "none", so use
+          # `|| true`.
           test "$(systemd-detect-virt --container 2>/dev/null || true)" = "none"
           sudo systemd-run --quiet --pipe --property=PrivateNetwork=yes /bin/true
           echo "systemd can create private network namespaces"
@@ -117,24 +124,34 @@ jobs:
           PID=$(systemctl show grant-signer.service -p MainPID --value)
           test -n "$PID" && test "$PID" != "0"
 
-          # The trust root is confined to a namespace with only loopback. This
-          # is the assertion the emulated amd64 run has to skip.
+          # The trust root is confined to a namespace with only loopback. The
+          # emulated amd64 run has to skip this assertion.
           IFACES=$(sudo nsenter -t "$PID" -n ip -o link show | awk -F': ' '{print $2}' | tr -d ' \n')
           echo "signer namespace interfaces: $IFACES"
           test "$IFACES" = "lo"
 
-          # And prove it, rather than trusting the interface list.
+          # Prove it, instead of trusting the interface list.
           if sudo nsenter -t "$PID" -n -- curl -s --max-time 5 -o /dev/null "$GRANTD_ORIGIN"; then
             echo "signer reached the network; the sandbox is not holding" >&2
             exit 1
           fi
           echo "signer cannot reach the network"
 
-          # The daemon is the process assumed to be compromised.
+          # The daemon is the process assumed to be compromised. File
+          # permissions exclude it first.
           ! sudo -u grantd cat /etc/grantd/ssh_ca 2>/dev/null
           ! sudo -u grantd cat /var/lib/grant-signer/state.db 2>/dev/null
           ! sudo -u grantd test -r /run/grantd/owner/owner.sock
           echo "daemon cannot reach key material or the owner socket"
+
+          # Then the unit's mount namespace hides the paths from everyone,
+          # root included.
+          DPID=$(systemctl show grantd.service -p MainPID --value)
+          test -n "$DPID" && test "$DPID" != "0"
+          sudo nsenter -t "$DPID" -m -- true
+          ! sudo nsenter -t "$DPID" -m -- test -e /etc/grantd/ssh_ca
+          ! sudo nsenter -t "$DPID" -m -- test -e /var/lib/grant-signer/state.db
+          echo "inside the daemon's mount namespace the key material does not exist"
 
       - name: capability URL to SSH session, with no client installed
         run: |
@@ -164,7 +181,7 @@ jobs:
 
       - name: the shell client agrees with the frozen vectors, in both locales
         run: |
-          # gawk is the default here, and this is where the UTF-8 %c bug lives.
+          # gawk is the default here. This is where the UTF-8 %c bug lives.
           awk --version | head -1
           sh tests/e2e/cbe-vectors.sh install/redeem.sh protocol/test-vectors/v1.json
 
@@ -180,8 +197,8 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.24'
           cache-dependency-path: go/go.sum
