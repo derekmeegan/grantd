@@ -15,6 +15,7 @@ import { docsMarkdown, grantInstructions } from "./routes/docs";
 // Imported as text so the script agents download is the one the test suite runs.
 import redeemScript from "../../install/redeem.sh";
 import installScriptFile from "../../install/install.sh";
+import redeemNodeScript from "../../install/redeem.mjs";
 import type { Env, RateLimiter } from "./env";
 
 export { HostDO } from "./durable-objects/host";
@@ -45,6 +46,11 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (request.method === "GET" && seg[0] === "redeem.sh") {
     return scriptResponse(redeemScript);
+  }
+  // The Node client, for sandboxes that have a JavaScript runtime and no
+  // openssl or ssh-keygen.
+  if (request.method === "GET" && seg[0] === "redeem.mjs") {
+    return scriptResponse(redeemNodeScript);
   }
   if (request.method === "GET" && seg[0] === "install") {
     return scriptResponse(installScriptFile);

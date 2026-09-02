@@ -16,6 +16,7 @@ PUBLIC_ORIGIN=""
 SSH_USER=""
 ADVERTISE_HOST=""
 ADVERTISE_PORT="22"
+LISTEN_PORT=""
 RELEASES_URL=""
 LOCAL_DIR=""
 RELEASE_KEY=""
@@ -66,6 +67,9 @@ Required:
 Options:
   --public-origin URL  origin to embed in capability URLs (default: --origin)
   --port N             SSH port to advertise (default 22)
+  --listen-port N      also make sshd listen on N, and advertise N. Use 443 for
+                       visitors in sandboxes that allow no other outbound port.
+                       Existing listeners are kept.
   --version V          release to install (default: latest from the manifest)
   --releases-url URL   where to fetch artifacts (default: ORIGIN/releases)
   --release-key KEY    ssh-ed25519 public key that must have signed the release
@@ -106,6 +110,7 @@ while [ $# -gt 0 ]; do
     --ssh-user) SSH_USER="$2"; shift 2 ;;
     --hostname) ADVERTISE_HOST="$2"; shift 2 ;;
     --port) ADVERTISE_PORT="$2"; shift 2 ;;
+    --listen-port) LISTEN_PORT="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --releases-url) RELEASES_URL="$2"; shift 2 ;;
     --release-key) RELEASE_KEY="$2"; shift 2 ;;
@@ -137,6 +142,19 @@ OWNER_GID="$(id -g "$SSH_USER")"
 
 command -v systemctl >/dev/null 2>&1 || die "grantd v1 requires systemd"
 SSHD="$(find_sshd)" || die "could not find sshd"
+
+# A visiting agent in a locked-down sandbox often reaches port 443 and nothing
+# else. --listen-port adds a listener there without disturbing the existing
+# ones, so the operator's own access on port 22 keeps working.
+if [ -n "$LISTEN_PORT" ]; then
+  case "$LISTEN_PORT" in
+    ''|*[!0-9]*) die "--listen-port must be a number" ;;
+  esac
+  [ "$LISTEN_PORT" -ge 1 ] && [ "$LISTEN_PORT" -le 65535 ] \
+    || die "--listen-port $LISTEN_PORT is out of range"
+  # An explicit --port wins. Otherwise advertise the port we are adding.
+  case " $* " in *" --port "*) ;; *) ADVERTISE_PORT="$LISTEN_PORT" ;; esac
+fi
 
 case "$(uname -s)" in Linux) ;; *) die "grantd v1 supports Linux only" ;; esac
 case "$(uname -m)" in
@@ -444,6 +462,31 @@ cat > "$SSHD_SNIPPET" <<CONF
 # held by the grantsigner account and never leaves this machine.
 TrustedUserCAKeys $CA_PUB
 CONF
+
+# Adding a listener means naming every port, because a Port directive replaces
+# the default rather than adding to it. Read the ports sshd uses now and write
+# all of them back, so the operator's own access cannot be removed here.
+if [ -n "$LISTEN_PORT" ]; then
+  CURRENT_PORTS="$("$SSHD" -T 2>/dev/null | awk 'tolower($1) == "port" { print $2 }')"
+  [ -n "$CURRENT_PORTS" ] || CURRENT_PORTS=22
+  if printf '%s\n' "$CURRENT_PORTS" | grep -qx "$LISTEN_PORT"; then
+    log "sshd already listens on $LISTEN_PORT"
+  else
+    # Refuse if another service holds the port. sshd would fail to bind on its
+    # next restart, and that failure would arrive long after this install.
+    if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$LISTEN_PORT" 2>/dev/null | grep -q .; then
+      die "something already listens on port $LISTEN_PORT; choose another --listen-port"
+    fi
+    {
+      echo
+      echo "# Listeners. Every existing port is repeated, because a Port"
+      echo "# directive replaces the default instead of adding to it."
+      printf 'Port %s\n' $CURRENT_PORTS
+      printf 'Port %s\n' "$LISTEN_PORT"
+    } >> "$SSHD_SNIPPET"
+    log "adding an sshd listener on port $LISTEN_PORT, keeping $(echo $CURRENT_PORTS | tr '\n' ' ')"
+  fi
+fi
 chmod 0644 "$SSHD_SNIPPET"
 
 # The gate. sshd is never reloaded on a configuration that does not parse.
@@ -464,7 +507,39 @@ so the grantd snippet has no effect. Remove or reorder that setting, then re-run
 fi
 log "sshd will trust $CA_PUB"
 
-if ! reload_sshd; then
+# A Port directive takes effect only on a restart. A reload does not rebind.
+if [ -n "$LISTEN_PORT" ] && ! "$SSHD" -T 2>/dev/null | awk 'tolower($1) == "port" { print $2 }' | grep -qx "$ADVERTISE_PORT"; then
+  die "sshd -T does not report port $ADVERTISE_PORT after writing the snippet"
+fi
+if [ -n "$LISTEN_PORT" ]; then
+  # Ubuntu 24.04 and later put sshd behind socket activation. A systemd
+  # generator turns the Port directives into the socket's ListenStream, so the
+  # generator has to run and the socket has to rebind. Restarting the service
+  # alone changes nothing there. Established sessions live in their own
+  # per-connection units and survive this.
+  if systemctl is-enabled ssh.socket >/dev/null 2>&1; then
+    systemctl daemon-reload
+    systemctl restart ssh.socket 2>/dev/null \
+      || warn "could not restart ssh.socket; the new listener starts with the next restart"
+  else
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null \
+      || warn "could not restart sshd; the new listener starts with the next restart"
+  fi
+  for _ in $(seq 1 20); do
+    if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$LISTEN_PORT" 2>/dev/null | grep -q .; then break; fi
+    sleep 0.25
+  done
+  if command -v ss >/dev/null 2>&1 && ! ss -ltnH "sport = :$LISTEN_PORT" 2>/dev/null | grep -q .; then
+    warn "sshd is not listening on $LISTEN_PORT yet; check 'systemctl status ssh'"
+  else
+    log "sshd is listening on $LISTEN_PORT"
+  fi
+  # A host firewall silently defeats the new listener.
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw status 2>/dev/null | grep -q "^$LISTEN_PORT" \
+      || warn "ufw is active and has no rule for $LISTEN_PORT; run: ufw allow $LISTEN_PORT/tcp"
+  fi
+elif ! reload_sshd; then
   warn "could not reload sshd via systemctl; the configuration is valid and will apply on next restart"
 fi
 
