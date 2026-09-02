@@ -87,17 +87,29 @@ mkdir -p "$OUT"
 # Hex is easier to get right in shell than raw bytes, and it keeps every
 # intermediate value printable while debugging.
 
-hexof()  { printf '%s' "$1" | od -An -tx1 -v | tr -d ' \n'; }
+hexof()  { printf '%s' "$1" | LC_ALL=C od -An -tx1 -v | tr -d ' \n'; }
 hexfile(){ od -An -tx1 -v < "$1" | tr -d ' \n'; }
 u32()    { printf '%08x' "$1"; }
 u64()    { printf '%016x' "$1"; }
-# hex -> raw bytes. Uses awk rather than printf '%b': dash's printf ignores
-# \xHH escapes entirely, so a bash-only version silently emits the literal text
-# "\x00\x00..." and every signature computed from it is wrong. awk's %c also
-# handles NUL, which canonical bytes are full of — every length prefix starts
-# with three of them.
+# hex -> raw bytes.
+#
+# Two portability traps live in this one function, and both corrupt signatures
+# silently rather than failing:
+#
+#   printf '%b' with \xHH would be the obvious implementation, but dash ignores
+#   those escapes entirely and emits the literal text "\x00\x00...". Any bash
+#   test of this passes while every real /bin/sh run produces garbage.
+#
+#   LC_ALL=C is not decoration. GNU awk in a UTF-8 locale treats printf "%c" as
+#   a *character*, so byte 0xff becomes the two bytes c3 bf. Every key, nonce
+#   and canonical encoding containing a high byte comes out longer and wrong.
+#   Debian's mawk happens to be byte-oriented, so this is invisible there and
+#   breaks on Ubuntu, which is the more common target.
+#
+# awk's %c also emits NUL correctly, which matters because canonical bytes are
+# full of them — every length prefix starts with three.
 unhex() {
-  printf '%s' "$1" | awk '
+  printf '%s' "$1" | LC_ALL=C awk '
     BEGIN { A = "0123456789abcdef" }
     {
       for (i = 1; i <= length($0); i += 2)
@@ -108,10 +120,11 @@ unhex() {
 b64u()   { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 b64u_decode_hex() {
   # base64url -> hex, restoring the padding the encoding drops.
+  # LC_ALL=C throughout: every tool here handles bytes, not text.
   _s="$(printf '%s' "$1" | tr '\-_' '+/')"
   _pad=$(( (4 - ${#_s} % 4) % 4 ))
   while [ "$_pad" -gt 0 ]; do _s="${_s}="; _pad=$((_pad - 1)); done
-  printf '%s' "$_s" | openssl base64 -d -A | od -An -tx1 -v | tr -d ' \n'
+  printf '%s' "$_s" | openssl base64 -d -A | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
 }
 
 # Pull one string or number out of a JSON object. Deliberately not a JSON
@@ -158,11 +171,11 @@ hmac_hex() { # <hex key> <hex message> -> base64url mac
 # conversion.
 agent_id_of() {
   unhex "$1" | openssl dgst -sha256 -binary | head -c 20 \
-    | base32 | tr -d '=\n' | tr 'A-Z' 'a-z' | sed 's/^/a_/'
+    | base32 | tr -d '=\n' | LC_ALL=C tr 'A-Z' 'a-z' | sed 's/^/a_/'
 }
 
 raw_pubkey_hex() { # <pem> -> 32 raw ed25519 public key bytes, hex
-  openssl pkey -in "$1" -pubout -outform DER | tail -c 32 | od -An -tx1 -v | tr -d ' \n'
+  openssl pkey -in "$1" -pubout -outform DER | tail -c 32 | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
 }
 
 # --------------------------------------------------------------- capability URL

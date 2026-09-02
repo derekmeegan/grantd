@@ -16,6 +16,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && apt-get install -y --no-install-recommends \
       openssh-server openssh-client ca-certificates curl jq util-linux procps \
       python3 coreutils \
+      gawk \
  && rm -f /etc/apt/apt.conf.d/99grantd-bootstrap \
  && rm -rf /var/lib/apt/lists/*
 
@@ -26,6 +27,13 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 RUN useradd -m -s /bin/bash ubuntu \
  && useradd -r -M -s /usr/sbin/nologin grantd \
  && useradd -r -M -s /usr/sbin/nologin grantsigner
+
+# gawk on purpose. Debian defaults to mawk, which is byte-oriented and hides a
+# class of bug that appears on Ubuntu: GNU awk in a UTF-8 locale treats
+# printf "%c" as a character, so byte 0xff becomes two bytes and every canonical
+# encoding containing a high byte is silently wrong. Installing gawk here means
+# the container suite exercises the same implementation the VM does, instead of
+# passing for a reason that does not generalize.
 
 # Only the two daemons are installed. There is deliberately no grantd client
 # binary here: the owner mints grants with curl over a Unix socket, and a

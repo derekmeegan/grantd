@@ -72,6 +72,26 @@ web/               static landing page
 2. `go/signer/redeem.go` — the only code path that can produce SSH access.
 3. `go/signer/store/store.go` — `ClaimGrant`, where single-use is enforced.
 
+## Testing
+
+| Suite | Environment | What it covers |
+|---|---|---|
+| `go test ./...` | — | canonical encoding, signer, a hostile coordination service |
+| `cloudflare && npm test` | Miniflare | Worker routing, Durable Objects, cross-language vectors |
+| `tests/e2e/run.sh` | Docker, two containers | capability URL to SSH session, driven by curl and POSIX sh |
+| `tests/install/run.sh` | Docker + systemd | install, sandbox, uninstall, SSH survival |
+| `tests/install/release.sh` | Docker + systemd | install from a signed release; tampered and wrongly-signed artifacts |
+| `tests/vm/run.sh` | **Lima VM, Ubuntu LTS** | **reboot**, unprivileged sandbox, daemon offline and back, service unreachable |
+
+The VM suite exists because containers cannot reboot, and `protocol/v1.md` §12
+makes claims that only a reboot can test. It also reaches the machine over SSH,
+so "the installer must not brick sshd" is finally tested where breaking it
+costs the test its own access.
+
+Not yet tested: a host with a public IP where SSH loss is unrecoverable, and
+the systemd sandbox on amd64 (qemu cannot create the namespace; the suite
+reports that as skipped rather than relaxing the unit).
+
 ## Status
 
 V1: Linux, OpenSSH, one enrolled non-root login account per host, direct SSH

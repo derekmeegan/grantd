@@ -11,6 +11,14 @@
 # fields passed separately. A bug that only appears in the second form is
 # exactly what slipped through the first time this was written.
 #
+# It runs every check twice: once under the C locale and once under a UTF-8 one.
+# That is not paranoia about locales in general — it is pinning a specific bug.
+# GNU awk in a UTF-8 locale treats printf "%c" as a character, so byte 0xff
+# becomes the two bytes c3 bf, and every key, nonce and canonical encoding
+# containing a high byte silently comes out wrong. Debian's mawk is
+# byte-oriented and hides this; Ubuntu's gawk does not. The script pins LC_ALL=C
+# internally, and this is what proves it.
+#
 # Usage: cbe-vectors.sh <redeem.sh> <v1.json>
 set -eu
 
@@ -30,10 +38,12 @@ ssh_key() { jq -r '.ssh_keys.agent_ssh_public_key' "$VECTORS"; }
 fail=0
 say() { printf '  %s %s\n' "$1" "$2"; }
 check() { # check <description> <got> <want>
-  if [ "$2" = "$3" ]; then say ok "$1"; else
-    say FAIL "$1"; printf '     got:  %s\n     want: %s\n' "$2" "$3"; fail=1
+  if [ "$2" = "$3" ]; then say ok "$1 [$LOCALE_LABEL]"; else
+    say FAIL "$1 [$LOCALE_LABEL]"; printf '     got:  %s\n     want: %s\n' "$2" "$3"; fail=1
   fi
 }
+
+run_checks() {
 
 HOST="$(id host_id)"; GRANT="$(id grant_id)"; AGENT="$(id agent_id)"
 APK="$(key agent_identity_pub_hex)"; SECRET="$(key grant_secret_hex)"
@@ -76,5 +86,19 @@ check "agent registration bytes (separate arguments)" \
 # --- identifier derivation
 DERIVED="$(agent_id_of "$APK")"
 check "agent_id derivation" "$DERIVED" "$AGENT"
+
+}
+
+# Under C, and under a UTF-8 locale that would expose a character-oriented awk.
+LOCALE_LABEL="C"
+LC_ALL=C run_checks
+
+UTF8="$(locale -a 2>/dev/null | grep -iE 'C\.utf-?8|en_US\.utf-?8' | head -1)"
+if [ -n "$UTF8" ]; then
+  LOCALE_LABEL="$UTF8"
+  LC_ALL="$UTF8" LANG="$UTF8" run_checks
+else
+  printf '  skip no UTF-8 locale available to test against\n'
+fi
 
 exit $fail
