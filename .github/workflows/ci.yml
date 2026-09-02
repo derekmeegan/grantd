@@ -1,0 +1,186 @@
+name: ci
+
+# The interesting job here is `native-amd64`. Everything else runs in containers
+# or emulation, which is how a locale bug that corrupted every signature on
+# Ubuntu survived six green test suites. A GitHub-hosted runner is a real amd64
+# VM with a real kernel, real systemd and real sshd — so the installer is run
+# directly on the machine, not inside anything.
+#
+# That is also the only free way to test the systemd sandbox on amd64: user-mode
+# qemu cannot create a private network namespace, so the local emulated run
+# reports that assertion as skipped. Here it actually executes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      origin:
+        description: coordination service to test against
+        required: false
+        default: https://grantd.derekmeegan.workers.dev
+
+env:
+  GRANTD_ORIGIN: ${{ github.event.inputs.origin || 'https://grantd.derekmeegan.workers.dev' }}
+  GRANTD_VERSION: v0.1.0
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: go/go.sum
+      - name: vet
+        working-directory: go
+        run: go vet ./...
+      - name: test
+        working-directory: go
+        run: go test ./... -timeout 10m
+      - name: the committed vectors match what the generator produces
+        working-directory: go
+        # A vector file edited by hand, or left stale after a protocol change,
+        # would make every conformance test agree with the wrong answer.
+        run: |
+          go run ./cmd/protocol-vectors /tmp/regen.json
+          diff -u ../protocol/test-vectors/v1.json /tmp/regen.json
+
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cloudflare/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  # The gap this whole file exists to close.
+  native-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: confirm this is a real amd64 machine, not a container
+        run: |
+          set -eu
+          echo "arch:   $(uname -m)"
+          echo "kernel: $(uname -r)"
+          echo "virt:   $(systemd-detect-virt || true)"
+          . /etc/os-release && echo "os:     $PRETTY_NAME"
+          test "$(uname -m)" = "x86_64"
+          # Not a container: the sandbox assertions below are only meaningful on
+          # a machine where systemd can actually build namespaces.
+          test "$(systemd-detect-virt --container || echo none)" = "none"
+          sudo systemd-run --quiet --pipe --property=PrivateNetwork=yes /bin/true
+          echo "systemd can create private network namespaces"
+
+      - name: prepare an sshd and an enrolled account
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server >/dev/null
+          grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config
+          sudo systemctl enable --now ssh
+          sudo useradd -m -s /bin/bash agentuser
+
+      - name: install from the published release
+        run: |
+          sudo install/install.sh --yes \
+            --origin "$GRANTD_ORIGIN" --version "$GRANTD_VERSION" \
+            --ssh-user agentuser --hostname 127.0.0.1
+
+      - name: sshd survived and the services are up
+        run: |
+          set -eu
+          sudo sshd -t
+          systemctl is-active ssh
+          systemctl is-active grant-signer.service
+          systemctl is-active grantd.service
+
+      - name: the systemd sandbox holds on real amd64
+        run: |
+          set -eu
+          PID=$(systemctl show grant-signer.service -p MainPID --value)
+          test -n "$PID" && test "$PID" != "0"
+
+          # The trust root is confined to a namespace with only loopback. This
+          # is the assertion the emulated amd64 run has to skip.
+          IFACES=$(sudo nsenter -t "$PID" -n ip -o link show | awk -F': ' '{print $2}' | tr -d ' \n')
+          echo "signer namespace interfaces: $IFACES"
+          test "$IFACES" = "lo"
+
+          # And prove it, rather than trusting the interface list.
+          if sudo nsenter -t "$PID" -n -- curl -s --max-time 5 -o /dev/null "$GRANTD_ORIGIN"; then
+            echo "signer reached the network; the sandbox is not holding" >&2
+            exit 1
+          fi
+          echo "signer cannot reach the network"
+
+          # The daemon is the process assumed to be compromised.
+          ! sudo -u grantd cat /etc/grantd/ssh_ca 2>/dev/null
+          ! sudo -u grantd cat /var/lib/grant-signer/state.db 2>/dev/null
+          ! sudo -u grantd test -r /run/grantd/owner/owner.sock
+          echo "daemon cannot reach key material or the owner socket"
+
+      - name: capability URL to SSH session, with no client installed
+        run: |
+          set -eu
+          for i in $(seq 1 30); do
+            sudo journalctl -u grantd.service -b --no-pager | grep -q "rendezvous connected" && break
+            sleep 2
+          done
+          sudo journalctl -u grantd.service -b --no-pager | grep -q "rendezvous connected"
+
+          URL=$(sudo -u agentuser curl -s --unix-socket /run/grantd/owner/owner.sock \
+                  -X POST http://localhost/grants -H 'content-type: application/json' \
+                  -d '{"ttl_seconds":600}' \
+                | sed -n 's/.*"capability_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          case "$URL" in https://*) ;; *) echo "mint failed: $URL" >&2; exit 1 ;; esac
+          sleep 3
+
+          sudo -u agentuser env GRANTD_IDENTITY=/tmp/v/id.pem \
+            sh install/redeem.sh --out /tmp/v "$URL"
+
+          OUT=$(sudo -u agentuser ssh -i /tmp/v/id_ed25519 \
+                  -o CertificateFile=/tmp/v/id_ed25519-cert.pub -o IdentitiesOnly=yes \
+                  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                  -o LogLevel=ERROR agentuser@127.0.0.1 whoami)
+          echo "logged in as: $OUT"
+          test "$OUT" = "agentuser"
+
+      - name: the shell client agrees with the frozen vectors, in both locales
+        run: |
+          # gawk is the default here, and this is where the UTF-8 %c bug lives.
+          awk --version | head -1
+          sh tests/e2e/cbe-vectors.sh install/redeem.sh protocol/test-vectors/v1.json
+
+      - name: uninstall cleanly
+        run: |
+          set -eu
+          sudo install/uninstall.sh --yes
+          sudo sshd -t
+          systemctl is-active ssh
+          test ! -e /etc/grantd/ssh_ca
+          test ! -e /etc/ssh/sshd_config.d/60-grantd.conf
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: go/go.sum
+      - name: end to end, host and visitor in separate containers
+        run: |
+          tests/e2e/run.sh --origin "$GRANTD_ORIGIN" --public-origin "$GRANTD_ORIGIN"
