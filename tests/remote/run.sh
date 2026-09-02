@@ -4,30 +4,25 @@
 #
 #   tests/remote/run.sh user@host [--ssh-user ACCOUNT] [--yes]
 #
-# This is the last environment the other suites cannot reach. Containers, the
-# local VM and CI all put the host and the visitor on the same machine, so the
-# SSH connection never left the box. Here the host is somewhere else and the
-# visitor is wherever you run this script, which means the test finally covers:
+# The other suites put the host and the visitor on the same machine, so the
+# SSH connection never leaves the box. Here the host is somewhere else and the
+# visitor is wherever you run this script. That covers:
 #
-#   * a real network path between visitor and host — real latency, real MTU,
-#     a real firewall in between
-#   * the rendezvous WebSocket crossing the actual internet to Cloudflare, from
-#     a machine behind whatever NAT the host happens to sit behind
-#   * `hostname` in the enrollment record being an address that means something
-#     to someone else, rather than 127.0.0.1
-#   * an installer failure that would genuinely cost you the machine
+#   * a real network path between visitor and host
+#   * the rendezvous WebSocket crossing the internet from behind the host's NAT
+#   * a `hostname` in the enrollment record that means something to someone else
+#   * an installer failure that costs you the machine
 #
 # READ THIS BEFORE RUNNING IT
 #
-# It installs grantd on the target and modifies that machine's sshd
-# configuration. The installer is built to make that safe — it refuses to start
-# if `sshd -t` already fails, gates every reload on `sshd -t`, and restores what
-# it found on any error — and that is exactly the behaviour this script exists
-# to test somewhere it matters. But the honest summary is: point this at a
-# disposable machine, not at anything you would mind losing.
+# It installs grantd on the target and changes that machine's sshd
+# configuration. The installer refuses to start if `sshd -t` already fails,
+# gates every reload on `sshd -t`, and restores what it found on any error.
+# That behaviour is what this script tests, somewhere it matters. Point it at
+# a disposable machine.
 #
 # It cleans up after itself, including uninstalling grantd, unless it fails
-# partway through.
+# part way through.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -38,6 +33,7 @@ ORIGIN="${GRANTD_TEST_ORIGIN:-https://grantd.derekmeegan.workers.dev}"
 VERSION="${GRANTD_TEST_VERSION:-v0.1.0}"
 ASSUME_YES=0
 KEEP=0
+USER_CREATED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,11 +55,10 @@ ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-# Your own connection to the box, kept entirely separate from anything grantd
-# issues. If the installer breaks sshd this is what stops working, which is the
-# point of running the test here.
+# Your own connection to the box, kept separate from anything grantd issues.
+# If the installer breaks sshd, this is what stops working.
 #
-# GRANTD_SSH_OPTS lets you point at a target that needs a specific key or config
+# GRANTD_SSH_OPTS points at a target that needs a specific key or config
 # (-F somefile, -i somekey, -p someport) without editing this script.
 SSH_OPTS="-o ConnectTimeout=15 -o BatchMode=yes ${GRANTD_SSH_OPTS:-}"
 rsh()  { ssh $SSH_OPTS "$TARGET" "$@"; }
@@ -76,9 +71,9 @@ trap cleanup EXIT
 step "target"
 rsh true 2>/dev/null || { echo "cannot reach $TARGET over SSH" >&2; exit 1; }
 rsh '. /etc/os-release; printf "  %s  %s  kernel %s\n" "$PRETTY_NAME" "$(uname -m)" "$(uname -r)"'
-# SSH_CONNECTION is "client_ip client_port server_ip server_port", so field 3 is
-# the address this machine reached the host on — which is exactly the address a
-# visitor should be told to dial.
+# SSH_CONNECTION is "client_ip client_port server_ip server_port". Field 3 is
+# the address this machine reached the host on, which is the address a
+# visitor must dial.
 REMOTE_ADDR="${ADVERTISE:-$(rsh 'echo $SSH_CONNECTION' 2>/dev/null | awk '{print $3}')}"
 [ -n "$REMOTE_ADDR" ] || REMOTE_ADDR="$(echo "$TARGET" | sed 's/.*@//')"
 echo "  address visitors will dial: $REMOTE_ADDR"
@@ -97,13 +92,18 @@ WARN
 fi
 
 step "preparing the host"
-rsudo "id $SSH_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $SSH_USER" \
-  && ok "enrolled account $SSH_USER exists" || bad "could not create $SSH_USER"
+# Only an account this script creates is deleted at the end.
+if rsh "id $SSH_USER >/dev/null 2>&1"; then
+  ok "enrolled account $SSH_USER already exists"
+else
+  rsudo "useradd -m -s /bin/bash $SSH_USER" \
+    && { USER_CREATED=1; ok "created enrolled account $SSH_USER"; } \
+    || bad "could not create $SSH_USER"
+fi
 # Staged into the login user's home first, then moved into place with sudo.
-# Extracting straight into a root-owned directory as a normal user fails trying
-# to restore that directory's own timestamps. COPYFILE_DISABLE and --no-xattrs
-# keep macOS from shipping resource-fork entries that GNU tar then complains
-# about.
+# Extracting straight into a root-owned directory as a normal user fails on
+# that directory's own timestamps. COPYFILE_DISABLE and --no-xattrs keep macOS
+# from shipping resource-fork entries that GNU tar rejects.
 rsh 'rm -rf ~/grantd-install && mkdir -p ~/grantd-install'
 ( cd "$REPO/install" && COPYFILE_DISABLE=1 tar --no-xattrs -cf - \
     install.sh uninstall.sh redeem.sh 2>/dev/null ) \
@@ -113,14 +113,14 @@ rsudo 'rm -rf /opt/grantd-install && mv ~'"$(rsh 'echo $USER')"'/grantd-install 
        && chmod 755 /opt/grantd-install && chmod +x /opt/grantd-install/*.sh' \
   && ok "installer staged" || bad "could not stage the installer"
 
-# Capture the pre-existing SSH state, so a claim that we did not break it can be
-# checked rather than assumed.
+# Record the SSH state before any change, so "we did not break it" is checked
+# and not assumed.
 rsudo 'sshd -t' && ok "sshd -t passes before we touch anything" \
   || { bad "sshd already broken on the target; refusing to continue"; exit 1; }
 
 step "installing $VERSION"
-# --hostname is the address the *recipient* will dial, which is the whole point
-# of testing here: on every other suite it was 127.0.0.1 and meant nothing.
+# --hostname is the address the recipient dials. On every other suite it is
+# 127.0.0.1 and means nothing.
 if rsudo "/opt/grantd-install/install.sh --yes --origin $ORIGIN --version $VERSION \
           --ssh-user $SSH_USER --hostname $REMOTE_ADDR" > "$WORK/install.log" 2>&1; then
   ok "installed"
@@ -163,7 +163,7 @@ URL="$(rsh "sudo -u $SSH_USER curl -s --unix-socket /run/grantd/owner/owner.sock
 case "$URL" in https://*) ok "minted a capability on the remote host" ;; *) bad "mint failed: $URL"; exit 1 ;; esac
 sleep 3
 
-# Redeemed *here*, on a different machine, with no grantd client installed.
+# Redeemed here, on a different machine, with no grantd client installed.
 OUT="$WORK/visit"
 if GRANTD_IDENTITY="$OUT/id.pem" sh "$REPO/install/redeem.sh" --out "$OUT" "$URL" \
      > "$WORK/redeem.json" 2> "$WORK/redeem.err"; then
@@ -178,14 +178,13 @@ GOT_HOST="$(sed -n 's/.*"hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "
   || bad "certificate points at $GOT_HOST, expected $REMOTE_ADDR"
 
 step "direct SSH, over the internet, never through Cloudflare"
-# Checked before attempting the connection, so an unroutable advertised address
-# produces an explanation instead of a timeout. This is the failure a host
-# behind NAT would hit in production too: the machine enrolled an address that
-# means nothing to the visitor.
+# Checked before the connection attempt, so an unroutable advertised address
+# gives an explanation instead of a timeout. A host behind NAT hits this in
+# production too.
 if ! (exec 3<>/dev/tcp/"$GOT_HOST"/22) 2>/dev/null; then
   bad "cannot reach $GOT_HOST:22 from here, so the direct-SSH leg cannot be tested"
   echo "     The host enrolled an address this machine cannot route to." >&2
-  echo "     On a real remote host that address is public and this works; pass" >&2
+  echo "     On a real remote host that address is public and this works. Pass" >&2
   echo "     --advertise ADDRESS if the one derived from SSH_CONNECTION is wrong." >&2
 else
 SSH_OUT="$(ssh -i "$OUT/id_ed25519" -o CertificateFile="$OUT/id_ed25519-cert.pub" \
@@ -198,7 +197,7 @@ case "$SSH_OUT" in
 esac
 fi
 
-# The point of the architecture: Cloudflare routed the grant and is now absent.
+# Cloudflare routed the grant and is now absent from the path.
 if [ "$FAIL" -eq 0 ] && [ -n "${SSH_OUT:-}" ]; then
   SSH_OUT2="$(ssh -i "$OUT/id_ed25519" -o CertificateFile="$OUT/id_ed25519-cert.pub" \
     -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -232,7 +231,12 @@ else
     "$SSH_USER@$GOT_HOST" true >/dev/null 2>&1 \
     && bad "a certificate issued before uninstall still authenticates" \
     || ok "certificates issued before uninstall no longer authenticate"
-  rsudo "rm -rf /opt/grantd-install; userdel -r $SSH_USER 2>/dev/null || true" >/dev/null 2>&1 || true
+  rsudo "rm -rf /opt/grantd-install" >/dev/null 2>&1 || true
+  if [ "$USER_CREATED" -eq 1 ]; then
+    rsudo "userdel -r $SSH_USER" >/dev/null 2>&1 \
+      && ok "removed the account this script created" \
+      || bad "could not remove $SSH_USER"
+  fi
 fi
 
 step "summary"

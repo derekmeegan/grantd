@@ -2,22 +2,19 @@
 # Check the shell implementation of canonical encoding against the frozen
 # vectors in protocol/test-vectors/v1.json.
 #
-# This is the third independent implementation of CBE — Go, TypeScript, sh — and
-# it is held to the same standard as the other two: reproduce the bytes from the
-# spec, do not merely interoperate. Two implementations can be wrong in the same
-# way forever and never notice.
+# This is the third independent implementation of CBE (Go, TypeScript, sh).
+# It must reproduce the bytes from the spec, not merely interoperate. Two
+# implementations can be wrong in the same way and never notice.
 #
-# It covers both call shapes of cbe(): fields pre-joined into one argument, and
-# fields passed separately. A bug that only appears in the second form is
-# exactly what slipped through the first time this was written.
+# It covers both call shapes of cbe(): fields pre-joined into one argument,
+# and fields passed separately. A bug that only appears in the second form is
+# what slipped through the first time this was written.
 #
-# It runs every check twice: once under the C locale and once under a UTF-8 one.
-# That is not paranoia about locales in general — it is pinning a specific bug.
-# GNU awk in a UTF-8 locale treats printf "%c" as a character, so byte 0xff
-# becomes the two bytes c3 bf, and every key, nonce and canonical encoding
-# containing a high byte silently comes out wrong. Debian's mawk is
-# byte-oriented and hides this; Ubuntu's gawk does not. The script pins LC_ALL=C
-# internally, and this is what proves it.
+# Every check runs twice: under the C locale and under a UTF-8 one. This pins
+# a specific bug. GNU awk in a UTF-8 locale treats printf "%c" as a
+# character, so byte 0xff becomes the two bytes c3 bf. Debian's mawk is
+# byte-oriented and hides this. Ubuntu's gawk does not. The script pins
+# LC_ALL=C internally, and this is what proves it.
 #
 # Usage: cbe-vectors.sh <redeem.sh> <v1.json>
 set -eu
@@ -25,12 +22,13 @@ set -eu
 REDEEM="${1:?usage: cbe-vectors.sh <redeem.sh> <v1.json>}"
 VECTORS="${2:?usage: cbe-vectors.sh <redeem.sh> <v1.json>}"
 
-# Pull the encoding and CBE helpers out of the shipped script, so this checks
-# the real thing rather than a copy that could drift. The range stops before the
-# capability-URL parsing, which expects arguments this test does not supply.
-# Pull in the helpers verbatim, including the OpenSSL selection: on macOS the
-# default `openssl` is LibreSSL and cannot do Ed25519, so a check that used it
-# would be testing a different binary than the script does.
+# Pull the helpers out of the shipped script, so this checks the real thing
+# and not a copy that can drift. The range stops before the capability-URL
+# parsing, which expects arguments this test does not supply.
+#
+# The OpenSSL selection comes along too. On macOS the default `openssl` is
+# LibreSSL and cannot do Ed25519, so a check that used it tests a different
+# binary than the script does.
 eval "$(sed -n '/^find_openssl()/,/^}/p' "$REDEEM")"
 OPENSSL="$(find_openssl)" || { echo "no Ed25519-capable OpenSSL found" >&2; exit 1; }
 eval "$(sed -n '/^hexof()/,/^raw_pubkey_hex()/p' "$REDEEM" | sed '$d')"
@@ -42,7 +40,7 @@ ssh_key() { jq -r '.ssh_keys.agent_ssh_public_key' "$VECTORS"; }
 
 fail=0
 say() { printf '  %s %s\n' "$1" "$2"; }
-check() { # check <description> <got> <want>
+check() { # check DESCRIPTION GOT WANT
   if [ "$2" = "$3" ]; then say ok "$1 [$LOCALE_LABEL]"; else
     say FAIL "$1 [$LOCALE_LABEL]"; printf '     got:  %s\n     want: %s\n' "$2" "$3"; fail=1
   fi
@@ -72,7 +70,7 @@ check "redemption proof bytes (one joined argument)" \
   "$GOT" "$(vec grantd/v1/redemption-proof canonical_hex)"
 
 tmp="$(mktemp)"; unhex "$GOT" > "$tmp"
-MAC="$(openssl dgst -sha256 -mac HMAC -macopt "hexkey:$SECRET" -binary "$tmp" \
+MAC="$("$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:$SECRET" -binary "$tmp" \
        | od -An -tx1 -v | tr -d ' \n')"
 rm -f "$tmp"
 check "HMAC over those bytes" "$MAC" "$(vec grantd/v1/redemption-proof mac_hex)"
@@ -94,7 +92,7 @@ check "agent_id derivation" "$DERIVED" "$AGENT"
 
 }
 
-# Under C, and under a UTF-8 locale that would expose a character-oriented awk.
+# Under C, and under a UTF-8 locale that exposes a character-oriented awk.
 LOCALE_LABEL="C"
 LC_ALL=C run_checks
 

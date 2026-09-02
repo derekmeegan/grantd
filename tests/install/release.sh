@@ -2,11 +2,10 @@
 #
 # Install from a real published release, not from local binaries.
 #
-# This is the path a user actually takes, and until now it had never run once:
-# every other test passed --local-dir, which skips the download entirely. What
-# is exercised here is the code that decides whether to trust a binary, so the
-# interesting assertions are the negative ones — a tampered artifact and a
-# release signed by the wrong key both have to be refused.
+# This is the path a user takes. Every other test passes --local-dir, which
+# skips the download. This suite exercises the code that decides whether to
+# trust a binary, so the important assertions are the negative ones: a
+# tampered artifact and a release signed by the wrong key must both be refused.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -19,8 +18,7 @@ IMAGE=grantd-install-test
 PASS=0; FAIL=0; SKIP=0
 ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
-# Skips are printed, counted, and never folded into the pass total. A test
-# environment that cannot exercise something should say so, not quietly agree.
+# Skips are printed and counted, never folded into the pass total.
 skip() { SKIP=$((SKIP+1)); printf '  \033[33mskip\033[0m %s\n' "$1"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 dsh()  { docker exec "$CONTAINER" bash -c "$1"; }
@@ -29,18 +27,17 @@ cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 # bash 3.2 (macOS) treats an empty array as unset under `set -u`, so this is
-# built as a plain string rather than an array.
+# a plain string, not an array.
 #
-# The image is tagged per platform. Under emulation the base image differs, and
-# reusing one tag across architectures silently runs the wrong binaries.
+# The image is tagged per platform. Under emulation the base image differs,
+# and one tag across architectures silently runs the wrong binaries.
 PLATFORM_ARGS=""
 if [ -n "$PLATFORM" ]; then
   PLATFORM_ARGS="--platform $PLATFORM"
   IMAGE="${IMAGE}-$(printf '%s' "$PLATFORM" | tr '/' '-')"
 fi
 
-# Build the image here rather than relying on one built earlier: a stale image
-# silently drops tools the tests need.
+# Build the image every run. A stale image silently drops tools the tests need.
 docker build -q $PLATFORM_ARGS -t "$IMAGE" "$REPO/tests/install" >/dev/null
 
 step "booting a systemd machine ${PLATFORM:+($PLATFORM)}"
@@ -53,29 +50,29 @@ for _ in $(seq 1 90); do
   dsh 'systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"' && break
   sleep 1
 done
-# Under emulation systemd reports "running" before namespace setup is reliably
-# available, and a unit with PrivateNetwork= then fails with 225/NETWORK. Wait
-# for the capability itself rather than for the system state.
+# Under emulation systemd reports "running" before namespace setup works, and
+# a unit with PrivateNetwork= then fails with 225/NETWORK. Wait for the
+# capability itself.
 for _ in $(seq 1 60); do
   dsh 'systemd-run --quiet --pipe --property=PrivateNetwork=yes /bin/true' >/dev/null 2>&1 && break
   sleep 1
 done
 ok "systemd up ($(dsh 'uname -m' | tr -d '\r\n'))"
 
-# ------------------------------------------------- a tampered release is refused
+# ------------------------------------------------ a tampered release is refused
 
 step "a tampered artifact is refused"
-# Serve a doctored copy of the release locally: real signature, real SHA256SUMS,
-# but one binary swapped. The signature still verifies — it covers the hash list,
-# not the files — so only the per-artifact hash check can catch this.
+# Serve a doctored copy of the release locally: real signature, real
+# SHA256SUMS, real VERSION, one binary swapped. The signature still verifies,
+# because it covers the hash list and not the files. Only the per-artifact
+# hash check can catch this.
 dsh "mkdir -p /srv/$VERSION && cd /srv/$VERSION && \
-     for f in grantd-linux-\$(dpkg --print-architecture) grant-signer-linux-\$(dpkg --print-architecture) SHA256SUMS SHA256SUMS.sig; do
+     for f in grantd-linux-\$(dpkg --print-architecture) grant-signer-linux-\$(dpkg --print-architecture) VERSION SHA256SUMS SHA256SUMS.sig; do
        curl -fsSL '$ORIGIN/releases/$VERSION/'\$f -o \$f; done && \
      echo '{\"version\":\"$VERSION\"}' > /srv/latest.json"
 dsh "printf 'not a real binary' > /srv/$VERSION/grantd-linux-\$(dpkg --print-architecture)"
 # Detached, so it outlives the exec session that started it. A backgrounded
-# process inside `docker exec` dies with that session, which silently produced a
-# server that was never listening.
+# process inside `docker exec` dies with that session.
 docker exec -d "$CONTAINER" python3 -m http.server 8099 --directory /srv
 for _ in $(seq 1 20); do
   dsh 'curl -sf -o /dev/null http://127.0.0.1:8099/latest.json' && break
@@ -98,17 +95,17 @@ dsh 'test ! -e /etc/ssh/sshd_config.d/60-grantd.conf' \
   || bad "a partial install survived"
 
 step "a release signed by the wrong key is refused"
-# Re-sign the (untampered) hash list with an attacker key. This is the case that
-# matters if the release bucket is compromised but the signing key is not.
-# rm the signature first: ssh-keygen -Y sign prompts before overwriting, and with
-# no TTY it declines silently — which left the genuine signature in place and made
-# this test report a vulnerability that did not exist.
+# Re-sign the untampered hash list with an attacker key. This is the case that
+# matters when the release bucket is compromised but the signing key is not.
+# Remove the signature first: ssh-keygen -Y sign prompts before overwriting,
+# and with no TTY it declines silently and leaves the genuine signature in
+# place.
 dsh "cd /srv/$VERSION && curl -fsSL '$ORIGIN/releases/$VERSION/grantd-linux-'\$(dpkg --print-architecture) -o grantd-linux-\$(dpkg --print-architecture) && \
      rm -f SHA256SUMS.sig && \
      ssh-keygen -q -t ed25519 -N '' -f /tmp/evil -C evil && \
      ssh-keygen -Y sign -f /tmp/evil -n grantd-release SHA256SUMS >/dev/null 2>&1 && \
      test -f SHA256SUMS.sig"
-# The signature must actually be the attacker's, or this test proves nothing.
+# The signature must be the attacker's, or the next assertion proves nothing.
 dsh "cd /srv/$VERSION && printf 'grantd-release %s\n' \"\$(ssh-keygen -y -f /tmp/evil)\" > /tmp/evil_allowed && \
      ssh-keygen -Y verify -f /tmp/evil_allowed -I grantd-release -n grantd-release \
        -s SHA256SUMS.sig < SHA256SUMS >/dev/null" \
@@ -124,13 +121,26 @@ else
     || { bad "refused for the wrong reason"; tail -3 /tmp/evil.log; }
 fi
 
-# ------------------------------------------------------ the genuine release
+step "a release served under the wrong version path is refused"
+# Restore the genuine signature, then serve the same release as a different
+# version. The signed VERSION file does not match the request.
+dsh "cd /srv/$VERSION && curl -fsSL '$ORIGIN/releases/$VERSION/SHA256SUMS.sig' -o SHA256SUMS.sig && \
+     mkdir -p /srv/v9.9.9 && cp /srv/$VERSION/* /srv/v9.9.9/"
+if dsh "/opt/grantd-install/install.sh --yes --origin $ORIGIN \
+        --releases-url http://127.0.0.1:8099 --version v9.9.9 \
+        --ssh-user ubuntu --hostname 127.0.0.1" >/tmp/downgrade.log 2>&1; then
+  bad "a release was installed under a version it was not signed as"
+else
+  grep -q "signed release is $VERSION but v9.9.9 was requested" /tmp/downgrade.log \
+    && ok "release under the wrong version path rejected" \
+    || { bad "refused for the wrong reason"; tail -3 /tmp/downgrade.log; }
+fi
 
-# Under qemu emulation, setting up this unit's private network namespace fails
-# with EIO, so the trust root cannot start with its real sandbox. The binaries
-# themselves are unaffected — everything else below still runs on amd64 — but the
-# sandbox is genuinely untested there, and is reported as skipped rather than
-# quietly relaxed and counted as a pass.
+# ------------------------------------------------------- the genuine release
+
+# Under qemu emulation, this unit's private network namespace fails with EIO,
+# so the trust root cannot start with its real sandbox. The binaries are
+# unaffected. The sandbox is untested there and is reported as skipped.
 EMULATED=0
 if [ -n "$PLATFORM" ] && [ "$(docker version --format '{{.Server.Arch}}')" != "$(printf '%s' "$PLATFORM" | cut -d/ -f2)" ]; then
   EMULATED=1
@@ -150,6 +160,8 @@ grep -q "verifying the release signature" /tmp/rel.log && ok "signature was veri
   || bad "install did not report verifying the signature"
 grep -q "verifying artifact hashes" /tmp/rel.log && ok "artifact hashes were verified during install" \
   || bad "install did not report verifying hashes"
+grep -q "release $VERSION is signed and complete" /tmp/rel.log && ok "signed VERSION matched the request" \
+  || bad "install did not report checking the signed version"
 
 dsh 'systemctl is-active grant-signer.service >/dev/null' && ok "signer running from the downloaded binary" \
   || bad "signer not running"

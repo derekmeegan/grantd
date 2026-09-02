@@ -1,12 +1,10 @@
 # A real VM for testing grantd: real kernel, real systemd, real reboot.
 #
-# Ubuntu LTS rather than Debian, because that is what most people will install
-# on and every container test so far has been Debian.
+# Ubuntu LTS, not Debian. Most people will install on Ubuntu, and every
+# container test uses Debian.
 #
-# The important property of this environment is one Docker cannot provide: Lima
-# reaches this machine over SSH. If the installer breaks sshd, `limactl shell`
-# breaks with it, exactly as it would on a remote host. The "do not brick SSH"
-# guarantee is finally being tested somewhere it costs something.
+# Lima reaches this machine over SSH. If the installer breaks sshd,
+# `limactl shell` breaks with it, exactly as it does on a remote host.
 images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
@@ -17,7 +15,7 @@ cpus: 2
 memory: "2GiB"
 disk: "20GiB"
 
-# No mounts and no port forwards beyond Lima's own SSH: the VM should look like
+# No mounts and no port forwards beyond Lima's own SSH. The VM must look like
 # a plain server, not a development sandbox.
 mounts: []
 ssh:

@@ -2,15 +2,14 @@
 #
 # Build, sign and publish a grantd release.
 #
-# The signing step is deliberately separate from the build step and deliberately
-# manual. If a compromise of the build or distribution infrastructure were
-# sufficient to produce a signed release, the signature would be decoration —
-# and since the artifact being signed is a daemon that runs on customer
-# machines, that would turn a CI compromise into a fleet compromise.
-#
-# The private key must live somewhere the build system cannot reach: a hardware
-# token, or an offline machine.
+# The signing step is separate from the build step and is manual. If a
+# compromised build or distribution system can produce a signed release, the
+# signature proves nothing. The artifact is a daemon that runs on customer
+# machines, so the private key must live where the build system cannot reach
+# it: a hardware token, or an offline machine.
 set -euo pipefail
+
+# ------------------------------------------------------------------ settings
 
 VERSION=""
 BUCKET="grantd-releases"
@@ -21,6 +20,7 @@ OUT=""
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m==> %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
@@ -29,13 +29,16 @@ grantd release builder
 
   install/release.sh --version vX.Y.Z [--signing-key PATH] [--publish]
 
-  --version PATH       release version, e.g. v0.1.0
+  --version V          release version, e.g. v0.1.0
   --signing-key PATH   ed25519 private key used to sign SHA256SUMS
                        (default: \$GRANTD_SIGNING_KEY)
   --out DIR            where to stage artifacts (default: a temp dir)
-  --publish            upload to the R2 bucket "$BUCKET" via wrangler
+  --bucket NAME        R2 bucket to publish to (default: $BUCKET)
+  --publish            upload to the R2 bucket via wrangler
 USAGE
 }
+
+# ----------------------------------------------------------------- arguments
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -54,18 +57,22 @@ case "$VERSION" in v[0-9]*) ;; *) die "version must look like v0.1.0" ;; esac
 [ -n "$SIGNING_KEY" ] || die "a signing key is required; releases are never published unsigned"
 [ -f "$SIGNING_KEY" ] || die "no such signing key: $SIGNING_KEY"
 
+if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+  warn "the working tree has uncommitted changes; the manifest will name a commit that does not match the build"
+fi
+
 [ -n "$OUT" ] || OUT="$(mktemp -d)"
 STAGE="$OUT/$VERSION"
 mkdir -p "$STAGE"
 
-# ------------------------------------------------------------------- build
+# --------------------------------------------------------------------- build
 
 log "building $VERSION"
 COMMIT="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 for arch in amd64 arm64; do
   for cmd in grantd grant-signer; do
-    # Reproducibility matters for a signed artifact: -trimpath removes local
-    # paths, and CGO is off so there is nothing of the build host in the binary.
+    # -trimpath removes local paths and CGO is off, so nothing of the build
+    # host ends up in a signed artifact.
     ( cd "$REPO/go" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
         go build -trimpath -ldflags "-s -w -buildid=" \
           -o "$STAGE/${cmd}-linux-${arch}" "./cmd/$cmd" )
@@ -73,20 +80,30 @@ for arch in amd64 arm64; do
 done
 log "built 4 artifacts"
 
-# ------------------------------------------------------------------- hashes
+# The installer checks this file against the version it asked for. It is
+# hashed with the binaries, so an old signed release cannot be served under a
+# new version path.
+printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 
-( cd "$STAGE" && sha256sum ./*-linux-* | sed 's|\./||' > SHA256SUMS )
+# -------------------------------------------------------------------- hashes
+
+( cd "$STAGE" && sha256sum \
+    grantd-linux-amd64 grantd-linux-arm64 \
+    grant-signer-linux-amd64 grant-signer-linux-arm64 \
+    VERSION > SHA256SUMS )
 log "hashed"
 
-# ------------------------------------------------------------------- signature
+# ----------------------------------------------------------------- signature
 
 log "signing SHA256SUMS"
-ssh-keygen -Y sign -f "$SIGNING_KEY" -n grantd-release "$STAGE/SHA256SUMS" >/dev/null 2>&1 \
+# ssh-keygen -Y sign refuses to overwrite a signature without a prompt.
+rm -f "$STAGE/SHA256SUMS.sig"
+ssh-keygen -Y sign -f "$SIGNING_KEY" -n grantd-release "$STAGE/SHA256SUMS" >/dev/null \
   || die "signing failed"
 SIGNER_PUB="$(ssh-keygen -y -f "$SIGNING_KEY")"
 
-# Verify the signature we just made, with the same command the installer uses.
-# A release that the installer would reject must never leave this machine.
+# Verify with the same command the installer uses. A release the installer
+# rejects must never leave this machine.
 printf 'grantd-release %s\n' "$SIGNER_PUB" > "$STAGE/allowed_signers"
 ssh-keygen -Y verify -f "$STAGE/allowed_signers" -I grantd-release -n grantd-release \
     -s "$STAGE/SHA256SUMS.sig" < "$STAGE/SHA256SUMS" >/dev/null \
@@ -94,7 +111,7 @@ ssh-keygen -Y verify -f "$STAGE/allowed_signers" -I grantd-release -n grantd-rel
 rm -f "$STAGE/allowed_signers"
 log "signature verified with the installer's own verification path"
 
-# ------------------------------------------------------------------- manifest
+# ------------------------------------------------------------------ manifest
 
 cat > "$STAGE/manifest.json" <<JSON
 {

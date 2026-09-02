@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# End-to-end test: a capability URL becomes a real SSH session on a real sshd,
-# and every way it should fail, does.
+# End-to-end test: a capability URL becomes a real SSH session on a real
+# sshd, and every way it must fail, does.
 #
 # Usage:
 #   tests/e2e/run.sh [--origin URL] [--public-origin URL]
@@ -42,7 +42,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------------------------------------------------------------- build
+# --------------------------------------------------------------------- build
 
 step "building"
 ( cd "$REPO/go"
@@ -57,23 +57,21 @@ ok "images and binaries built"
 
 OWNER_SOCK=/run/grantd/owner/owner.sock
 
-# Everything below drives the system the way a user would, with no grantd client
-# binary anywhere: the owner mints over a Unix socket with curl, and the visitor
-# redeems with install/redeem.sh — curl, openssl, ssh-keygen. If the protocol
-# ever stops being usable that way, these tests fail rather than the claim
-# quietly becoming untrue.
+# Everything below drives the system the way a user does, with no grantd
+# client binary. The owner mints over a Unix socket with curl, and the visitor
+# redeems with install/redeem.sh. If the protocol stops being usable that way,
+# these tests fail.
 
-
-# ---------------------------------------------------------------- boot
+# ---------------------------------------------------------------------- boot
 
 step "starting host and visitor"
 docker rm -f "$CONTAINER" "$VISITOR" >/dev/null 2>&1 || true
 docker network rm "$NET" >/dev/null 2>&1 || true
 docker network create "$NET" >/dev/null
 
-# The host advertises its own name on the shared network, and the visitor is a
-# separate container that resolves it. That makes "direct SSH, never proxied" a
-# real property of the test rather than a loopback shortcut.
+# The host advertises its own name on the shared network, and the visitor is
+# a separate container that resolves it. "Direct SSH, never proxied" is then a
+# real property of the test, not a loopback shortcut.
 HOST_IP="$CONTAINER"
 docker run -d --name "$CONTAINER" --network "$NET" -p "$SSH_PORT:22" \
   -e GRANTD_ORIGIN="$ORIGIN" \
@@ -98,24 +96,23 @@ done
 ok "host $HOST_ID enrolled and connected"
 
 # Mint a capability with curl over the owner socket, exactly as documented.
-mint() {
+mint() { # mint TTL_SECONDS
   docker exec -u ubuntu "$CONTAINER" sh -c \
     "curl -s --unix-socket $OWNER_SOCK -X POST http://localhost/grants \
        -H 'content-type: application/json' -d '{\"ttl_seconds\":$1}'" \
   | sed -n 's/.*\"capability_url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p'
 }
 
-# Redeem from a separate container, so the visitor really is a different machine
+# Redeem from a separate container, so the visitor is a different machine
 # with nothing but curl, openssl and ssh-keygen.
-redeem() { # redeem <outdir-name> <capability url>  -> writes /out/<name> in the visitor
+redeem() { # redeem OUTDIR_NAME CAPABILITY_URL  (writes /out/NAME in the visitor)
   docker exec "$VISITOR" sh -c \
     "GRANTD_IDENTITY=/out/$1/identity.pem sh /usr/local/bin/redeem.sh --out /out/$1 '$2'"
 }
 
 step "the shell implementation agrees with the frozen vectors"
-# A third independent implementation of the canonical encoding. It is checked
-# the same way Go and TypeScript are, against protocol/test-vectors, because
-# "it seems to interoperate" is not evidence that two implementations agree.
+# The third independent implementation of the canonical encoding. It is
+# checked against protocol/test-vectors the same way Go and TypeScript are.
 docker cp "$REPO/protocol/test-vectors/v1.json" "$VISITOR:/tmp/v1.json" >/dev/null
 if docker exec "$VISITOR" sh /usr/local/bin/cbe-vectors.sh \
      /usr/local/bin/redeem.sh /tmp/v1.json; then
@@ -140,8 +137,8 @@ SSH_OUT=$(docker exec "$VISITOR" ssh -i /out/visit/id_ed25519 \
 [ "$SSH_OUT" = "ubuntu" ] && ok "logged in as ubuntu over real sshd" || bad "ssh login: $SSH_OUT"
 
 CERT=/out/visit/id_ed25519-cert.pub
-# The serial in the response must be the serial in the certificate. A JSON round
-# trip through float64 silently breaks this, so it is checked explicitly.
+# The serial in the response must be the serial in the certificate. A JSON
+# round trip through float64 silently breaks this.
 REPORTED=$(sed -n 's/.*"serial"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' "$WORK/result.json")
 ACTUAL=$(docker exec "$VISITOR" ssh-keygen -L -f "$CERT" | awk '/Serial:/{print $2}')
 [ "$REPORTED" = "$ACTUAL" ] && ok "reported serial matches the certificate ($ACTUAL)" \
@@ -157,7 +154,7 @@ else
   ok "certificate grants no port, agent or X11 forwarding"
 fi
 
-# ---------------------------------------------------------- single use
+# ---------------------------------------------------------------- single use
 
 step "a grant is single use"
 if redeem visit2 "$URL" >"$WORK/e2" 2>&1; then
@@ -171,15 +168,15 @@ fi
 step "there is no retry path"
 URL2="$(mint 1200)"; sleep 3
 redeem visit3 "$URL2" >/dev/null 2>&1 || true
-# Resubmitting is refused: the grant is spent, and a lost response costs a new
-# capability rather than a special case in the claim transaction.
+# The grant is spent. A lost response costs a new capability, not a special
+# case in the claim transaction.
 if redeem visit3 "$URL2" >"$WORK/e3" 2>&1; then
   bad "a spent grant was redeemed again"
 else
   ok "a spent grant cannot be redeemed again"
 fi
 
-# ---------------------------------------------------------- revocation
+# ---------------------------------------------------------------- revocation
 
 step "revocation takes effect immediately"
 URL3="$(mint 1200)"; sleep 3
@@ -198,11 +195,10 @@ fi
 step "the network-facing daemon cannot reach key material"
 # Assume the daemon is fully compromised: run as its uid and try everything.
 #
-# These assert on exit status rather than on error text. A test that greps for
-# "permission denied" passes for the wrong reason when the command is truncated,
-# silenced, or fails differently — and a security assertion that can pass for the
-# wrong reason is worse than no assertion.
-denied() { # denied <description> <shell>
+# These assert on exit status, not on error text. A test that greps for
+# "permission denied" passes for the wrong reason when the command is
+# truncated, silenced, or fails differently.
+denied() { # denied DESCRIPTION SHELL_COMMAND
   if docker exec -u grantd "$CONTAINER" sh -c "$2" >/dev/null 2>&1; then
     bad "$1 — SUCCEEDED and must not have"
   else
@@ -218,20 +214,20 @@ denied "daemon cannot write the signer state dir"    'touch /var/lib/grant-signe
 denied "daemon cannot modify sshd configuration"     'echo x > /etc/ssh/sshd_config.d/zz-evil.conf'
 denied "daemon cannot even reach the owner socket"   "curl -sS --unix-socket $OWNER_SOCK -X POST http://localhost/grants -d '{}'"
 
-# The daemon socket does exist for the daemon, and is deliberately narrow: the
-# grant-creation route is simply not mounted on it.
+# The daemon socket exists for the daemon and is narrow: the grant-creation
+# route is not mounted on it.
 out=$(docker exec -u grantd "$CONTAINER" sh -c \
   "curl -s -o /dev/null -w '%{http_code}' --unix-socket /run/grantd/redeem/redeem.sock http://localhost/grants" 2>&1)
 [ "$out" = "404" ] && ok "daemon socket exposes no grant-creation endpoint" \
   || bad "unexpected status from daemon socket /grants: $out"
 
-# ...and it is reachable, so the 404 above means "no such route", not "no socket".
+# It is reachable, so the 404 above means "no such route", not "no socket".
 out=$(docker exec -u grantd "$CONTAINER" sh -c \
   "curl -s -o /dev/null -w '%{http_code}' --unix-socket /run/grantd/redeem/redeem.sock http://localhost/status" 2>&1)
 [ "$out" = "200" ] && ok "daemon socket is reachable by the daemon (so the 404 is a missing route)" \
   || bad "daemon could not reach its own socket: $out"
 
-# ---------------------------------------------------------- expiry
+# -------------------------------------------------------------------- expiry
 
 step "expiry is enforced by the host"
 URL4="$(mint 60)"; sleep 3
@@ -244,7 +240,7 @@ else
     || bad "unexpected error: $(tail -2 "$WORK/e5")"
 fi
 
-# ---------------------------------------------------------- summary
+# ------------------------------------------------------------------- summary
 
 step "summary"
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"

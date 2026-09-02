@@ -1,14 +1,12 @@
-# A realistic grantd host: real sshd, real user separation, real process split.
-# The point of this image is that the end-to-end test proves an actual SSH
-# login, not a certificate that merely parses.
+# A realistic grantd host: real sshd, real user separation, real process
+# split. The end-to-end test proves an actual SSH login, not a certificate
+# that merely parses.
 FROM debian:bookworm-slim
 
-# The build environment here blocks outbound port 80, so apt is pointed at
-# HTTPS. debian:bookworm-slim ships no CA bundle, so TLS peer verification has
-# to be relaxed for the bootstrap fetch only — package *authenticity* is still
-# enforced the whole time by the Debian archive's GPG signatures, which is the
-# property that actually matters. The override is removed as soon as
-# ca-certificates is installed.
+# The build environment blocks outbound port 80, so apt uses HTTPS. The base
+# image ships no CA bundle, so peer verification is off for the bootstrap
+# fetch only. Package authenticity is still enforced by the Debian archive's
+# GPG signatures. The override is removed once ca-certificates is installed.
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && printf 'deb https://deb.debian.org/debian bookworm main\ndeb https://deb.debian.org/debian bookworm-updates main\ndeb https://deb.debian.org/debian-security bookworm-security main\n' > /etc/apt/sources.list \
  && echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99grantd-bootstrap \
@@ -22,23 +20,20 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 
 # Three accounts, three jobs:
 #   ubuntu       the login account a visiting agent gets, and the grant owner
-#   grantd       the network-facing daemon; holds no key material at all
-#   grantsigner  the trust root; owns the keys, has no reason to touch a socket
+#   grantd       the network-facing daemon, which holds no key material
+#   grantsigner  the trust root, which owns the keys
 RUN useradd -m -s /bin/bash ubuntu \
  && useradd -r -M -s /usr/sbin/nologin grantd \
  && useradd -r -M -s /usr/sbin/nologin grantsigner
 
-# gawk on purpose. Debian defaults to mawk, which is byte-oriented and hides a
-# class of bug that appears on Ubuntu: GNU awk in a UTF-8 locale treats
-# printf "%c" as a character, so byte 0xff becomes two bytes and every canonical
-# encoding containing a high byte is silently wrong. Installing gawk here means
-# the container suite exercises the same implementation the VM does, instead of
-# passing for a reason that does not generalize.
+# gawk on purpose. Debian defaults to mawk, which is byte-oriented and hides
+# a bug that appears on Ubuntu. GNU awk in a UTF-8 locale treats printf "%c"
+# as a character, so byte 0xff becomes two bytes. With gawk, the container
+# suite exercises the same awk the VM does.
 
-# Only the two daemons are installed. There is deliberately no grantd client
-# binary here: the owner mints grants with curl over a Unix socket, and a
-# visitor redeems with install/redeem.sh, which is curl, openssl and ssh-keygen.
-# If those paths work, the "no SDK required" claim is true rather than asserted.
+# Only the two daemons are installed. There is no grantd client binary. The
+# owner mints grants with curl over a Unix socket, and a visitor redeems with
+# install/redeem.sh. If those paths work, the "no SDK required" claim holds.
 COPY grantd grant-signer /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY redeem.sh cbe-vectors.sh /usr/local/bin/

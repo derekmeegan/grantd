@@ -2,23 +2,19 @@
 #
 # grantd on a real VM.
 #
-# Everything before this ran in containers, which cannot test the three claims
-# that matter most when something goes wrong on a machine you cannot walk over
-# to:
+# Containers cannot test three claims that matter most on a machine you
+# cannot walk over to:
 #
 #   1. Reboot. protocol/v1.md §12 says signer state survives, the daemon
-#      reconnects, and unexpired grants stay redeemable. A container cannot
-#      reboot, so none of that had ever happened.
-#   2. The systemd sandbox without --privileged. Every previous sandbox
-#      assertion ran in a privileged container, which is not the environment the
-#      units are written for.
-#   3. "Do not brick SSH", tested somewhere it costs something. Lima reaches
-#      this VM over SSH, so if the installer breaks sshd, this script loses the
-#      machine exactly as it would lose a remote host. In Docker there was
-#      always `docker exec`.
+#      reconnects, and unexpired grants stay redeemable.
+#   2. The systemd sandbox without --privileged. The units are written for a
+#      normal machine, not a privileged container.
+#   3. "Do not brick SSH", tested where it costs something. Lima reaches this
+#      VM over SSH. If the installer breaks sshd, this script loses the
+#      machine exactly as it loses a remote host.
 #
-# It also runs on Ubuntu LTS with a 6.x kernel and OpenSSH 9.x, rather than the
-# Debian bookworm the containers use.
+# It runs on Ubuntu LTS with a 6.x kernel and OpenSSH 9.x. The containers use
+# Debian bookworm.
 #
 # Usage: tests/vm/run.sh [--keep]
 set -euo pipefail
@@ -38,8 +34,8 @@ step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 vm()  { limactl shell "$VM" -- bash -c "$1"; }
 vmq() { limactl shell "$VM" -- bash -c "$1" 2>/dev/null; }
-# As the enrolled owner, which is a different account from the one Lima logs in
-# as — root cannot traverse the setgid socket directory either.
+# As the enrolled owner. Lima logs in as a different account, and root cannot
+# traverse the setgid socket directory either.
 owner() { limactl shell "$VM" -- sudo -u "$SSH_USER" sh -c "$1"; }
 
 command -v limactl >/dev/null || { echo "limactl not found; brew install lima" >&2; exit 1; }
@@ -52,8 +48,8 @@ vm 'printf "  virt: %s   systemd %s\n" "$(systemd-detect-virt)" "$(systemctl --v
 [ "$(vmq 'systemd-detect-virt' | tr -d '\r\n')" != "none" ] && ok "running on a real VM, not a container" \
   || bad "systemd-detect-virt says this is not virtualized"
 
-# A privileged container can do things a normal machine cannot; this one is not
-# privileged, so a sandbox that works here works for real.
+# This machine is not a privileged container, so a sandbox that works here
+# works for real.
 vm "sudo systemd-run --quiet --pipe --property=PrivateNetwork=yes /bin/true" \
   && ok "systemd can create private network namespaces unprivileged" \
   || bad "PrivateNetwork unavailable"
@@ -67,11 +63,11 @@ tar -C "$REPO" -cf - install | limactl shell "$VM" -- sudo tar -C /opt -xf - --s
 vm 'sudo chmod +x /opt/grantd-install/*.sh; test -x /opt/grantd-install/install.sh' \
   && ok "installer staged" || bad "could not stage the installer"
 
-# ------------------------------------------------------------- SSH must survive
+# ------------------------------------------------------------ SSH must survive
 
 step "SSH must survive the install"
-# This script's own access to the VM is SSH. If the installer breaks sshd, every
-# command after this point fails and the machine is gone — which is the point.
+# This script reaches the VM over SSH. If the installer breaks sshd, every
+# command after this point fails and the machine is gone.
 BEFORE_SSHD="$(vmq 'systemctl show ssh -p ActiveState --value' | tr -d '\r\n')"
 [ "$BEFORE_SSHD" = "active" ] && ok "sshd active before install" || bad "sshd not active before install"
 
@@ -96,14 +92,13 @@ vm 'systemctl is-active grantd.service >/dev/null' && ok "daemon active" || bad 
 
 SIGNER_PID="$(vmq 'systemctl show grant-signer.service -p MainPID --value' | tr -d '\r\n')"
 if [ -n "$SIGNER_PID" ] && [ "$SIGNER_PID" != "0" ]; then
-  # The strongest available statement of "the trust root has no network": enter
-  # its namespace and look.
+  # Enter the signer's network namespace and look.
   IFACES="$(vmq "sudo nsenter -t $SIGNER_PID -n ip -o link show | awk -F': ' '{print \$2}' | tr '\n' ' '")"
   case "$(echo "$IFACES" | tr -d ' ')" in
     lo) ok "signer's network namespace contains only loopback" ;;
     *)  bad "signer namespace has interfaces: $IFACES" ;;
   esac
-  # And prove it cannot actually reach anything.
+  # Prove it cannot reach anything.
   if vmq "sudo nsenter -t $SIGNER_PID -n -- curl -s --max-time 5 -o /dev/null $ORIGIN"; then
     bad "the signer could reach the coordination service"
   else
@@ -118,15 +113,15 @@ vm 'sudo -u grantd cat /var/lib/grant-signer/state.db' >/dev/null 2>&1 \
 
 # --------------------------------------------------------------- the happy path
 
-mint() { # mint <ttl seconds>
+mint() { # mint TTL_SECONDS
   owner "curl -s --unix-socket /run/grantd/owner/owner.sock -X POST http://localhost/grants \
            -H 'content-type: application/json' -d '{\"ttl_seconds\":$1}'" \
   | sed -n 's/.*"capability_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
-redeem() { # redeem <outdir> <url>
+redeem() { # redeem OUTDIR URL
   owner "rm -rf $1 && GRANTD_IDENTITY=$1/id.pem sh /opt/grantd-install/redeem.sh --out $1 '$2'"
 }
-ssh_as_visitor() { # ssh_as_visitor <outdir> <command>
+ssh_as_visitor() { # ssh_as_visitor OUTDIR COMMAND
   owner "ssh -i $1/id_ed25519 -o CertificateFile=$1/id_ed25519-cert.pub \
     -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR -o ConnectTimeout=10 $SSH_USER@127.0.0.1 '$2'"
@@ -143,13 +138,12 @@ fi
 OUT="$(ssh_as_visitor /tmp/v1 whoami 2>&1 | tr -d '[:space:]')"
 [ "$OUT" = "$SSH_USER" ] && ok "SSH login on a real VM with a real kernel" || bad "ssh failed: $OUT"
 
-# ------------------------------------------------------------------- reboot
+# -------------------------------------------------------------------- reboot
 
 step "the machine reboots"
-# The centerpiece. A grant is minted *before* the reboot and redeemed *after*,
-# so this tests all three claims at once: signer state on disk survived, the
-# socket directories were recreated on a fresh tmpfs, the daemon reconnected on
-# its own, and the grant is still good.
+# A grant is minted before the reboot and redeemed after. That tests signer
+# state on disk, the socket directories on a fresh tmpfs, the daemon
+# reconnecting on its own, and the grant staying good.
 SURVIVOR_URL="$(mint 1800)"
 case "$SURVIVOR_URL" in http*) ok "minted a grant that must survive a reboot" ;; *) bad "mint failed" ;; esac
 sleep 3
@@ -170,8 +164,8 @@ vm 'systemctl is-active grant-signer.service >/dev/null' \
 vm 'systemctl is-active grantd.service >/dev/null' \
   && ok "daemon started automatically after reboot" || bad "daemon did not start after reboot"
 
-# /run is a tmpfs, so these were destroyed by the reboot and must have been
-# recreated from tmpfiles.d with their setgid bits intact.
+# /run is a tmpfs. The reboot destroyed these directories, and tmpfiles.d must
+# have recreated them with their setgid bits.
 MODE="$(vmq "stat -c '%a %U:%G' /run/grantd/owner" | tr -d '\r\n')"
 [ "$MODE" = "2770 grantsigner:$SSH_USER" ] \
   && ok "socket directory recreated with the right mode and group ($MODE)" \
@@ -203,7 +197,7 @@ OUT="$(ssh_as_visitor /tmp/v2 whoami 2>&1 | tr -d '[:space:]')"
 [ "$OUT" = "$SSH_USER" ] && ok "SSH login with a certificate issued after the reboot" \
   || bad "ssh failed after reboot: $OUT"
 
-# --------------------------------------------------- daemon offline and back
+# ---------------------------------------------------- daemon offline and back
 
 step "the daemon goes offline and comes back"
 OFFLINE_URL="$(mint 900)"; sleep 3
@@ -230,8 +224,7 @@ else
 fi
 
 step "an issued certificate outlives the coordination service"
-# §12: if the service is unreachable, existing certificates keep working. This
-# is the property that makes grantd degrade well — SSH never depended on it.
+# §12: if the service is unreachable, existing certificates keep working.
 vm "sudo iptables -I OUTPUT -p tcp --dport 443 -j REJECT 2>/dev/null || \
     sudo nft add rule inet filter output tcp dport 443 reject 2>/dev/null || true"
 OUT="$(ssh_as_visitor /tmp/v4 'echo still-works' 2>&1 | tr -d '[:space:]')"
@@ -240,7 +233,7 @@ OUT="$(ssh_as_visitor /tmp/v4 'echo still-works' 2>&1 | tr -d '[:space:]')"
   || bad "certificate stopped working when the service was unreachable: $OUT"
 vm "sudo iptables -D OUTPUT -p tcp --dport 443 -j REJECT 2>/dev/null || true"
 
-# ------------------------------------------------------------------ uninstall
+# ----------------------------------------------------------------- uninstall
 
 step "uninstalling"
 vm 'sudo cp /tmp/v4/id_ed25519 /tmp/keep_key && sudo cp /tmp/v4/id_ed25519-cert.pub /tmp/keep_cert.pub \
@@ -259,5 +252,6 @@ vm "ssh -i /tmp/keep_key -o CertificateFile=/tmp/keep_cert.pub -o IdentitiesOnly
 
 step "summary"
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
+# The VM is always left running. Without --keep, say how to remove it.
 [ "$KEEP" -eq 1 ] || echo "  (VM left running; 'limactl delete -f $VM' to remove it)"
 [ "$FAIL" -eq 0 ]

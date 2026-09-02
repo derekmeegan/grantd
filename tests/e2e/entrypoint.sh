@@ -1,14 +1,14 @@
 #!/bin/bash
-# Brings up a grantd host the way the installer will: keys owned by the signer
+# Brings up a grantd host the way the installer does: keys owned by the signer
 # account, sshd trusting the generated CA, and the daemon running unprivileged.
 set -euo pipefail
 
-# Two origins, because they are genuinely different things:
+# Two origins, because they are different things:
 #   ORIGIN         where this machine dials out to reach the service
-#   PUBLIC_ORIGIN  what a capability URL says, i.e. where the *recipient* will go
-# In production they are the same string. Behind NAT, in a container, or via a
-# private link they are not, and baking the machine's own view into a URL handed
-# to someone else would produce a link only this machine can follow.
+#   PUBLIC_ORIGIN  what a capability URL says, i.e. where the recipient goes
+# In production they are the same string. Behind NAT or in a container they
+# are not, and a URL with the machine's own view of the service is a link
+# only this machine can follow.
 ORIGIN="${GRANTD_ORIGIN:?GRANTD_ORIGIN is required}"
 PUBLIC_ORIGIN="${GRANTD_PUBLIC_ORIGIN:-$ORIGIN}"
 SSH_USER="${GRANTD_SSH_USER:-ubuntu}"
@@ -21,15 +21,13 @@ install -d -m 0700 -o grantsigner -g grantsigner /var/lib/grant-signer
 install -d -m 0755 -o root -g root /run/grantd
 install -d -m 0755 /run/sshd
 
-# Each socket lives in its own setgid directory. The setgid bit makes the kernel
-# assign the directory's group to the socket at creation, so an unprivileged
-# signer ends up with owner.sock in the owner's group and redeem.sock in the
-# daemon's — without ever needing chown, and without the signer being a member
-# of either group.
+# Each socket lives in its own setgid directory. The kernel assigns the
+# directory's group to the socket at creation, so the unprivileged signer
+# never needs chown and is not a member of either group.
 #
-# The directory group is also what gates traversal, so this is two independent
-# gates rather than one: the directory, and the socket's own 0660 mode. The
-# SO_PEERCRED uid check in the signer is a third.
+# The directory group also gates traversal. That is two independent gates:
+# the directory, and the socket's own 0660 mode. The SO_PEERCRED uid check in
+# the signer is a third.
 install -d -m 2770 -o grantsigner -g "$SSH_USER" /run/grantd/owner
 install -d -m 2770 -o grantsigner -g grantd /run/grantd/redeem
 
@@ -41,8 +39,8 @@ setpriv --reuid=grantsigner --regid=grantsigner --clear-groups \
     --port "$ADVERTISE_PORT" \
     --origin "$PUBLIC_ORIGIN"
 
-# sshd needs to read the CA public key, and /etc/grantd is 0700 to the signer.
-# Copy the public half out rather than loosening the directory.
+# sshd must read the CA public key, and /etc/grantd is 0700 to the signer.
+# Copy the public half out instead of loosening the directory.
 install -m 0644 -o root -g root /etc/grantd/ssh_ca.pub /etc/ssh/grantd_user_ca.pub
 
 cat > /etc/ssh/sshd_config.d/60-grantd.conf <<'CONF'
@@ -51,8 +49,7 @@ TrustedUserCAKeys /etc/ssh/grantd_user_ca.pub
 CONF
 
 echo "==> validating sshd configuration"
-# Never reload sshd on a configuration that does not parse. Bricking SSH on a
-# remote machine is the worst failure this product can have.
+# Never reload sshd on a configuration that does not parse.
 ssh-keygen -A >/dev/null
 /usr/sbin/sshd -t
 

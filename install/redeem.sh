@@ -2,34 +2,37 @@
 #
 # Redeem a grantd capability URL and open an SSH session.
 #
-# This is a reference implementation, and its real job is to be evidence: the
-# protocol needs no SDK and no grantd-specific client. Everything here is curl,
-# openssl, ssh-keygen and coreutils, working from protocol/v1.md alone. If this
-# script ever needs something exotic, the protocol has drifted somewhere it
-# should not have.
-#
-# One honest exception, called out where it happens: the registration proof of
-# work wants a real interpreter. A shell loop manages a few hundred hashes a
-# second, and 20 bits needs about a million of them. That is the proof of work
-# doing its job — the cost is the point — but it does mean the one-time
-# registration reaches for python3 when it can.
-#
-# POSIX sh on purpose. An agent that has to install bash to redeem a capability
-# is an agent that has been handed an SDK by another name.
+# This is the reference client. It uses curl, openssl, ssh-keygen and
+# coreutils only, and follows protocol/v1.md. The proof of work at first
+# registration uses python3 when present, because a shell loop is slow.
 #
 # Usage:
-#   redeem.sh 'https://…/g/<host_id>/<grant_id>#<secret>' [--out DIR] [--connect [cmd…]]
+#   redeem.sh [URL] [--out DIR] [--identity FILE] [--connect [cmd...]]
+#
+# The URL can also come from the GRANTD_CAPABILITY variable, or from stdin
+# when URL is "-". Other users on the same machine can read command line
+# arguments, so prefer those two forms on a shared machine.
 set -eu
 
-CAP=""
+CAP="${GRANTD_CAPABILITY:-}"
 OUT=""
 CONNECT=0
 IDENTITY="${GRANTD_IDENTITY:-${HOME:-.}/.grantd/agent_identity.pem}"
+
+# ------------------------------------------------------------------ helpers
+
+die()  { echo "redeem.sh: $*" >&2; exit 1; }
+note() { echo "$*" >&2; }
 
 usage() {
   sed -n '2,/^set -eu/p' "$0" | sed 's/^# \{0,1\}//;$d' >&2
   exit 2
 }
+
+# matches <string> <extended regex>
+matches() { printf '%s' "$1" | grep -Eq "$2"; }
+
+# ---------------------------------------------------------------- arguments
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,28 +40,23 @@ while [ $# -gt 0 ]; do
     --identity) IDENTITY="$2"; shift 2 ;;
     --connect) CONNECT=1; shift; break ;;
     -h|--help) usage ;;
-    -*) echo "unknown flag: $1" >&2; exit 2 ;;
+    -) CAP="$(cat)"; shift ;;
+    -*) die "unknown flag: $1" ;;
     *) CAP="$1"; shift ;;
   esac
 done
 [ -n "$CAP" ] || usage
 
-for tool in curl ssh-keygen od sed tr awk; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "redeem.sh needs $tool" >&2; exit 1; }
+for tool in curl ssh-keygen od sed tr awk grep; do
+  command -v "$tool" >/dev/null 2>&1 || die "needs $tool"
 done
 
-die() { echo "redeem.sh: $*" >&2; exit 1; }
+# ------------------------------------------------------------------ openssl
+#
+# macOS ships LibreSSL as openssl, and LibreSSL has no Ed25519. It fails
+# with "Algorithm ed25519 not found" and still exits 0. So test the
+# capability instead of the version string.
 
-# Find an OpenSSL that can actually do Ed25519.
-#
-# macOS ships LibreSSL as `openssl`, and LibreSSL has no Ed25519 at all: it
-# fails with "Algorithm ed25519 not found" while still exiting 0, so a naive
-# `command -v openssl` check passes and the script dies later with no
-# explanation. Every Linux distro ships OpenSSL 3.x, which is why this only
-# shows up on a laptop — and a laptop is exactly where a visiting agent runs.
-#
-# The capability is tested rather than the version string parsed, because that
-# is the thing actually needed.
 find_openssl() {
   for candidate in \
       "${GRANTD_OPENSSL:-}" \
@@ -78,68 +76,65 @@ find_openssl() {
 
 OPENSSL="$(find_openssl)" || die "no OpenSSL with Ed25519 support found.
   openssl on this machine is $(openssl version 2>/dev/null || echo 'missing').
-  macOS ships LibreSSL, which cannot do Ed25519 — install OpenSSL 3
+  macOS ships LibreSSL, which cannot do Ed25519. Install OpenSSL 3
   (brew install openssl@3) or set GRANTD_OPENSSL to a capable binary."
 
-# Every HTTP call goes through this. `set -e` plus `curl -sf` would otherwise
-# exit with no output at all, which is the worst possible failure mode for a
-# script whose caller is often an agent with no terminal to inspect: a rate
-# limit and a typo in the URL would look identical, and both would look like
-# nothing happening.
-http() { # http <method> <url> [body] -> body on stdout, status on fd 3
-  _m="$1"; _u="$2"; _b="${3:-}"
-  _out="$(mktemp)"
-  if [ -n "$_b" ]; then
+# ---------------------------------------------------------------- work dirs
+
+[ -n "$OUT" ] || OUT="$(mktemp -d)"
+mkdir -p "$OUT"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+umask 077
+
+# --------------------------------------------------------------------- http
+#
+# Every HTTP call goes through here. A bare `curl -sf` under `set -e` exits
+# with no message, and an agent with no terminal cannot tell a typo from a
+# rate limit.
+
+http() { # http <method> <url> [body file] -> response body on stdout
+  _method="$1"; _url="$2"; _bodyfile="${3:-}"
+  _out="$WORK/http.out"
+  if [ -n "$_bodyfile" ]; then
     _code="$(curl -s -o "$_out" -w '%{http_code}' --connect-timeout 10 --max-time 60 \
-      -X "$_m" "$_u" -H 'content-type: application/json' -d "$_b")"
+      -X "$_method" "$_url" -H 'content-type: application/json' -d "@$_bodyfile")"
   else
     _code="$(curl -s -o "$_out" -w '%{http_code}' --connect-timeout 10 --max-time 60 \
-      -X "$_m" "$_u")"
+      -X "$_method" "$_url")"
   fi
-  _body="$(cat "$_out")"; rm -f "$_out"
+  _body="$(cat "$_out")"
   case "$_code" in
     2*) printf '%s' "$_body"; return 0 ;;
-    000) die "could not reach $_u (connection failed or timed out)" ;;
-    429) die "rate limited by $_u — wait a minute and try again" ;;
+    000) die "could not reach $_url (connection failed or timed out)" ;;
+    429) die "rate limited by $_url. Wait a minute and try again" ;;
     *)
-      _err="$(printf '%s' "$_body" | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-      _msg="$(printf '%s' "$_body" | sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-      if [ -n "$_err" ]; then die "$_err: ${_msg:-HTTP $_code} (from $_u)"; fi
-      die "HTTP $_code from $_u: $(printf '%s' "$_body" | head -c 200)"
+      _err="$(json_str "$_body" code)"
+      _msg="$(json_str "$_body" message)"
+      [ -z "$_err" ] || die "$_err: ${_msg:-HTTP $_code} (from $_url)"
+      die "HTTP $_code from $_url: $(printf '%s' "$_body" | head -c 200)"
       ;;
   esac
 }
 
-[ -n "$OUT" ] || OUT="$(mktemp -d)"
-mkdir -p "$OUT"
+# ---------------------------------------------------------------- encodings
+#
+# Canonical bytes are built as hex strings and converted to bytes once at
+# the end. Hex stays printable while debugging.
+#
+# tests/e2e/cbe-vectors.sh evaluates the functions from hexof() up to
+# raw_pubkey_hex(). Keep that range free of top-level commands.
 
-# ------------------------------------------------------------------ encodings
-#
-# Canonical bytes are assembled as a hex string and converted once at the end.
-# Hex is easier to get right in shell than raw bytes, and it keeps every
-# intermediate value printable while debugging.
+hexof()   { printf '%s' "$1" | LC_ALL=C od -An -tx1 -v | tr -d ' \n'; }
+hexfile() { od -An -tx1 -v < "$1" | tr -d ' \n'; }
+u32()     { printf '%08x' "$1"; }
+u64()     { printf '%016x' "$1"; }
 
-hexof()  { printf '%s' "$1" | LC_ALL=C od -An -tx1 -v | tr -d ' \n'; }
-hexfile(){ od -An -tx1 -v < "$1" | tr -d ' \n'; }
-u32()    { printf '%08x' "$1"; }
-u64()    { printf '%016x' "$1"; }
-# hex -> raw bytes.
+# unhex <hex> -> raw bytes on stdout
 #
-# Two portability traps live in this one function, and both corrupt signatures
-# silently rather than failing:
-#
-#   printf '%b' with \xHH would be the obvious implementation, but dash ignores
-#   those escapes entirely and emits the literal text "\x00\x00...". Any bash
-#   test of this passes while every real /bin/sh run produces garbage.
-#
-#   LC_ALL=C is not decoration. GNU awk in a UTF-8 locale treats printf "%c" as
-#   a *character*, so byte 0xff becomes the two bytes c3 bf. Every key, nonce
-#   and canonical encoding containing a high byte comes out longer and wrong.
-#   Debian's mawk happens to be byte-oriented, so this is invisible there and
-#   breaks on Ubuntu, which is the more common target.
-#
-# awk's %c also emits NUL correctly, which matters because canonical bytes are
-# full of them — every length prefix starts with three.
+# Two portability traps. dash ignores printf '%b' escapes such as \xHH. GNU
+# awk in a UTF-8 locale prints %c as a character, so byte 0xff becomes two
+# bytes. LC_ALL=C makes awk print bytes, including NUL.
 unhex() {
   printf '%s' "$1" | LC_ALL=C awk '
     BEGIN { A = "0123456789abcdef" }
@@ -149,34 +144,32 @@ unhex() {
     }'
 }
 
-b64u()   { "$OPENSSL" base64 -A | tr '+/' '-_' | tr -d '='; }
+b64u() { "$OPENSSL" base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# b64u_decode_hex <base64url> -> hex
 b64u_decode_hex() {
-  # base64url -> hex, restoring the padding the encoding drops.
-  # LC_ALL=C throughout: every tool here handles bytes, not text.
   _s="$(printf '%s' "$1" | tr '\-_' '+/')"
   _pad=$(( (4 - ${#_s} % 4) % 4 ))
   while [ "$_pad" -gt 0 ]; do _s="${_s}="; _pad=$((_pad - 1)); done
   printf '%s' "$_s" | "$OPENSSL" base64 -d -A | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
 }
 
-# Pull one string or number out of a JSON object. Deliberately not a JSON
-# parser: these responses are small, flat, and generated by this project.
+# json_str <json> <key> and json_num <json> <key> read one flat value. The
+# responses are small and this project generates them. The values are still
+# validated before use.
 json_str() { printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
 json_num() { printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p" | head -1; }
 
-# ------------------------------------------------------------------------ CBE
-#
-# protocol/v1.md §1:
+# CBE, protocol/v1.md section 1:
 #   CBE(context, fields) = LP(utf8(context)) || u32be(len(fields))
 #                          || for each: LP(utf8(name)) || tag || LP(value)
+lp()       { printf '%s%s' "$(u32 $(( ${#1} / 2 )))" "$1"; }
+f_string() { printf '%s01%s' "$(lp "$(hexof "$1")")" "$(lp "$(hexof "$2")")"; }
+f_u64()    { printf '%s02%s' "$(lp "$(hexof "$1")")" "$(lp "$(u64 "$2")")"; }
+f_bytes()  { printf '%s03%s' "$(lp "$(hexof "$1")")" "$(lp "$2")"; }
 
-lp()      { printf '%s%s' "$(u32 $(( ${#1} / 2 )))" "$1"; }
-f_string(){ printf '%s01%s' "$(lp "$(hexof "$1")")" "$(lp "$(hexof "$2")")"; }
-f_u64()   { printf '%s02%s' "$(lp "$(hexof "$1")")" "$(lp "$(u64 "$2")")"; }
-f_bytes() { printf '%s03%s' "$(lp "$(hexof "$1")")" "$(lp "$2")"; }
-# Fields are concatenated explicitly. "$*" would join them with a space, which
-# is invisible in a hex string and produces canonical bytes that differ from
-# every other implementation — the exact class of bug CBE exists to prevent.
+# cbe <context> <field count> <field hex>... -> hex
+# The fields are joined without a separator. "$*" would insert spaces.
 cbe() {
   _ctx="$1"; _n="$2"; shift 2
   _acc=""
@@ -184,28 +177,49 @@ cbe() {
   printf '%s%s%s' "$(lp "$(hexof "$_ctx")")" "$(u32 "$_n")" "$_acc"
 }
 
-# --------------------------------------------------------------------- crypto
-
-ed25519_sign_hex() { # <pem> <hex message> -> base64url signature
-  _tmp="$(mktemp)"; unhex "$2" > "$_tmp"
-  "$OPENSSL" pkeyutl -sign -inkey "$1" -rawin -in "$_tmp" | b64u
-  rm -f "$_tmp"
+# ed25519_sign_hex <private key pem> <hex message> -> base64url signature
+ed25519_sign_hex() {
+  _msg="$(mktemp)"; unhex "$2" > "$_msg"
+  "$OPENSSL" pkeyutl -sign -inkey "$1" -rawin -in "$_msg" | b64u
+  rm -f "$_msg"
 }
 
-hmac_hex() { # <hex key> <hex message> -> base64url mac
-  _tmp="$(mktemp)"; unhex "$2" > "$_tmp"
-  "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:$1" -binary "$_tmp" | b64u
-  rm -f "$_tmp"
+# ed25519_verify_hex <hex public key> <hex message> <hex signature>
+ed25519_verify_hex() {
+  _der="$(mktemp)"; _msg="$(mktemp)"; _sig="$(mktemp)"
+  unhex "302a300506032b6570032100$1" > "$_der"
+  unhex "$2" > "$_msg"
+  unhex "$3" > "$_sig"
+  "$OPENSSL" pkeyutl -verify -pubin -keyform DER -inkey "$_der" -rawin \
+    -in "$_msg" -sigfile "$_sig" >/dev/null 2>&1
+  _ok=$?
+  rm -f "$_der" "$_msg" "$_sig"
+  return $_ok
 }
 
-# base32, RFC 4648, lowercase, no padding — implemented here rather than shelled
-# out to base32(1), which is GNU coreutils and absent on macOS and the BSDs. A
-# visiting agent is often on a laptop, and "install coreutils first" is exactly
-# the kind of dependency this script exists to avoid.
+# hmac_hex <hex key> <hex message> -> base64url mac
 #
-# It consumes hex so no binary crosses a pipe, and it masks the accumulator after
-# every emitted character so the running value stays under 2^7 instead of growing
-# to a 160-bit number awk would render as a float.
+# With python3 the key travels in the environment, which other users cannot
+# read. Without python3 the key is on the openssl command line.
+hmac_hex() {
+  _msg="$(mktemp)"; unhex "$2" > "$_msg"
+  if command -v python3 >/dev/null 2>&1; then
+    HMAC_KEY_HEX="$1" python3 -c '
+import hashlib, hmac, os, sys
+key = bytes.fromhex(os.environ["HMAC_KEY_HEX"])
+msg = open(sys.argv[1], "rb").read()
+sys.stdout.buffer.write(hmac.new(key, msg, hashlib.sha256).digest())
+' "$_msg" | b64u
+  else
+    "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:$1" -binary "$_msg" | b64u
+  fi
+  rm -f "$_msg"
+}
+
+# b32_from_hex <hex> -> RFC 4648 base32, lowercase, no padding
+#
+# Implemented in awk because base32(1) is GNU only. The accumulator is
+# masked after every character so that awk never needs more than 13 bits.
 b32_from_hex() {
   printf '%s' "$1" | LC_ALL=C awk '
     BEGIN { A = "abcdefghijklmnopqrstuvwxyz234567"; H = "0123456789abcdef" }
@@ -227,21 +241,24 @@ b32_from_hex() {
     }'
 }
 
-# agent_id = "a_" || base32(sha256(pub)[0:20])
-agent_id_of() {
-  _d="$(unhex "$1" | "$OPENSSL" dgst -sha256 -binary | LC_ALL=C od -An -tx1 -v -N 20 | tr -d ' \n')"
-  printf 'a_%s' "$(b32_from_hex "$_d")"
+# id_of <prefix> <hex public key> -> <prefix>_base32(sha256(key)[0:20])
+id_of() {
+  _d="$(unhex "$2" | "$OPENSSL" dgst -sha256 -binary | LC_ALL=C od -An -tx1 -v -N 20 | tr -d ' \n')"
+  printf '%s_%s' "$1" "$(b32_from_hex "$_d")"
 }
+agent_id_of() { id_of a "$1"; }
+host_id_of()  { id_of h "$1"; }
 
-raw_pubkey_hex() { # <pem> -> 32 raw ed25519 public key bytes, hex
+# raw_pubkey_hex <private key pem> -> 32 raw public key bytes, hex
+raw_pubkey_hex() {
   "$OPENSSL" pkey -in "$1" -pubout -outform DER | tail -c 32 | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
 }
 
-# --------------------------------------------------------------- capability URL
+# ----------------------------------------------------------- capability URL
 
 case "$CAP" in
   *'#'*) ;;
-  *) echo "that URL has no '#' fragment, so it carries no capability secret" >&2; exit 1 ;;
+  *) die "the URL has no '#' fragment, so it carries no capability secret" ;;
 esac
 
 SECRET_B64="${CAP##*#}"
@@ -251,30 +268,92 @@ REST="${CAP_PATH%/*}"
 HOST_ID="${REST##*/}"
 ORIGIN="${REST%/g/*}"
 
+matches "$HOST_ID" '^h_[a-z2-7]{32}$' || die "malformed host id in the URL"
+matches "$GRANT_ID" '^g_[a-z2-7]{16}$' || die "malformed grant id in the URL"
+matches "$ORIGIN" '^https?://[A-Za-z0-9.:-]+$' || die "malformed origin in the URL"
+
 SECRET_HEX="$(b64u_decode_hex "$SECRET_B64")"
-[ "${#SECRET_HEX}" -eq 64 ] || { echo "the capability secret is not 32 bytes" >&2; exit 1; }
+[ "${#SECRET_HEX}" -eq 64 ] || die "the capability secret is not 32 bytes"
 
-echo "host:   $HOST_ID" >&2
-echo "grant:  $GRANT_ID" >&2
-echo "origin: $ORIGIN" >&2
+note "host:   $HOST_ID"
+note "grant:  $GRANT_ID"
+note "origin: $ORIGIN"
 
-# ------------------------------------------------------------------- identity
+# ------------------------------------------------------------- host record
+#
+# The service is not trusted. The host id is a hash of the host identity key,
+# so the host's signed registration can be verified with no other trust
+# anchor. Hostname, port, user and the SSH CA come from that record.
+
+RECORD="$(http GET "$ORIGIN/v1/hosts/$HOST_ID")"
+REG="$(printf '%s' "$RECORD" | sed -n 's/.*"registration"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p')"
+[ -n "$REG" ] || die "the host record carries no signed registration"
+
+REG_VERSION="$(json_num "$REG" version)"
+REG_HOST_ID="$(json_str "$REG" host_id)"
+REG_PUB_HEX="$(b64u_decode_hex "$(json_str "$REG" identity_public_key)")"
+CA_PUB="$(json_str "$REG" ssh_ca_public_key)"
+HOST="$(json_str "$REG" hostname)"
+PORT="$(json_num "$REG" ssh_port)"
+USER="$(json_str "$REG" ssh_user)"
+REG_TS="$(json_num "$REG" timestamp)"
+REG_NONCE_HEX="$(b64u_decode_hex "$(json_str "$REG" nonce)")"
+REG_SIG_HEX="$(b64u_decode_hex "$(json_str "$RECORD" signature)")"
+
+[ "$REG_VERSION" = 1 ] || die "host registration has protocol version '$REG_VERSION'"
+[ "$REG_HOST_ID" = "$HOST_ID" ] || die "host record is for a different host"
+[ "$(host_id_of "$REG_PUB_HEX")" = "$HOST_ID" ] || die "host identity key does not match the host id"
+matches "$CA_PUB" '^ssh-ed25519 [A-Za-z0-9+/]+=*$' || die "host record carries a malformed SSH CA key"
+matches "$HOST" '^[][A-Za-z0-9._:][][A-Za-z0-9._:-]{0,252}$' || die "host record carries a malformed hostname"
+matches "$PORT" '^[0-9]{1,5}$' && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "host record carries a bad port"
+matches "$USER" '^[a-z_][a-z0-9_-]{0,31}$' || die "host record carries a bad user name"
+[ "$USER" != root ] || die "host record names root"
+
+REG_CBE="$(cbe 'grantd/v1/host-register' 9 \
+    "$(f_u64    version 1)" \
+    "$(f_string host_id "$HOST_ID")" \
+    "$(f_bytes  identity_public_key "$REG_PUB_HEX")" \
+    "$(f_string ssh_ca_public_key "$CA_PUB")" \
+    "$(f_string hostname "$HOST")" \
+    "$(f_u64    ssh_port "$PORT")" \
+    "$(f_string ssh_user "$USER")" \
+    "$(f_u64    timestamp "$REG_TS")" \
+    "$(f_bytes  nonce "$REG_NONCE_HEX")")"
+ed25519_verify_hex "$REG_PUB_HEX" "$REG_CBE" "$REG_SIG_HEX" \
+  || die "host registration signature does not verify"
+
+printf '%s\n' "$CA_PUB" > "$WORK/ca.pub"
+CA_FP="$(ssh-keygen -lf "$WORK/ca.pub" | awk '{print $2}')"
+note "target: $USER@$HOST:$PORT (signed by the host)"
+
+# ------------------------------------------------------------------ identity
 
 if [ ! -f "$IDENTITY" ]; then
   mkdir -p "$(dirname "$IDENTITY")"
-  ( umask 077; "$OPENSSL" genpkey -algorithm ed25519 -out "$IDENTITY" 2>/dev/null )
-  echo "generated a new agent identity at $IDENTITY" >&2
+  "$OPENSSL" genpkey -algorithm ed25519 -out "$IDENTITY" 2>/dev/null
+  note "generated a new agent identity at $IDENTITY"
 fi
 AGENT_PUB_HEX="$(raw_pubkey_hex "$IDENTITY")"
 AGENT_ID="$(agent_id_of "$AGENT_PUB_HEX")"
-echo "agent:  $AGENT_ID" >&2
+note "agent:  $AGENT_ID"
 
-# ---------------------------------------------------------------- registration
+# -------------------------------------------------------------- registration
 
-solve_pow() { # <prefix hex> <difficulty bits> -> nonce
-  prefix_hex="$1"; bits="$2"
+# leading_zero_bits <hex digest> <bits>: true if the digest starts with at
+# least <bits> zero bits.
+leading_zero_bits() {
+  _full=$(( $2 / 4 )); _rem=$(( $2 % 4 ))
+  _head="$(printf '%s' "$1" | cut -c1-"$_full")"
+  [ "$_full" -eq 0 ] || matches "$_head" '^0+$' || return 1
+  [ "$_rem" -eq 0 ] && return 0
+  _next="$(printf '%s' "$1" | cut -c$((_full + 1)))"
+  [ $(( 0x$_next )) -lt $(( 1 << (4 - _rem) )) ]
+}
+
+# solve_pow <prefix hex> <difficulty bits> -> nonce
+solve_pow() {
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$prefix_hex" "$bits" <<'PY'
+    python3 - "$1" "$2" <<'PY'
 import hashlib, sys
 prefix = bytes.fromhex(sys.argv[1]); bits = int(sys.argv[2])
 need = bits // 8; rem = bits % 8
@@ -287,80 +366,76 @@ while True:
 PY
     return
   fi
-  # Shell fallback. Correct, and slow enough that you will notice: a few hundred
-  # hashes a second against a target that expects about a million. That is the
-  # proof of work working as intended, not a bug.
-  echo "no python3; solving the proof of work in shell, which will take a while" >&2
-  i=0
-  tmp="$(mktemp)"
-  zeros="$(printf '0%.0s' $(seq 1 $(( bits / 4 ))))"
+  note "no python3; solving the proof of work in shell, which takes a while"
+  _i=0
   while :; do
-    unhex "$prefix_hex" > "$tmp"; printf '%s' "$i" >> "$tmp"
-    digest="$("$OPENSSL" dgst -sha256 -binary "$tmp" | od -An -tx1 -v | tr -d ' \n')"
-    case "$digest" in "$zeros"*) printf '%s' "$i"; rm -f "$tmp"; return ;; esac
-    i=$((i + 1))
+    unhex "$1" > "$WORK/pow"; printf '%s' "$_i" >> "$WORK/pow"
+    _digest="$("$OPENSSL" dgst -sha256 -binary "$WORK/pow" | od -An -tx1 -v | tr -d ' \n')"
+    if leading_zero_bits "$_digest" "$2"; then printf '%s' "$_i"; return; fi
+    _i=$((_i + 1))
   done
 }
 
-if ! curl -sf -o /dev/null --connect-timeout 10 --max-time 30 "$ORIGIN/v1/agents/$AGENT_ID"; then
-  echo "registering $AGENT_ID" >&2
-  CH="$(http POST "$ORIGIN/v1/agent-challenges")"
-  CH_ID="$(json_str "$CH" challenge_id)"
-  POW_PREFIX="$(json_str "$CH" prefix)"
-  POW_BITS="$(json_num "$CH" difficulty_bits)"
-  [ -n "$CH_ID" ] || { echo "could not start a registration challenge" >&2; exit 1; }
+register() {
+  note "registering $AGENT_ID"
+  _ch="$(http POST "$ORIGIN/v1/agent-challenges")"
+  _ch_id="$(json_str "$_ch" challenge_id)"
+  _prefix="$(json_str "$_ch" prefix)"
+  _bits="$(json_num "$_ch" difficulty_bits)"
+  [ -n "$_ch_id" ] && [ -n "$_prefix" ] && [ -n "$_bits" ] || die "could not start a registration challenge"
 
-  POW_NONCE="$(solve_pow "$(b64u_decode_hex "$POW_PREFIX")" "$POW_BITS")"
-  TS="$(date -u +%s)"
-
-  REG_CBE="$(cbe 'grantd/v1/agent-register' 6 \
-      "$(f_u64   version 1)" \
+  _nonce="$(solve_pow "$(b64u_decode_hex "$_prefix")" "$_bits")"
+  _ts="$(date -u +%s)"
+  _cbe="$(cbe 'grantd/v1/agent-register' 6 \
+      "$(f_u64    version 1)" \
       "$(f_string agent_id "$AGENT_ID")" \
       "$(f_bytes  public_key "$AGENT_PUB_HEX")" \
-      "$(f_string challenge_id "$CH_ID")" \
-      "$(f_string pow_nonce "$POW_NONCE")" \
-      "$(f_u64   timestamp "$TS")")"
-  REG_SIG="$(ed25519_sign_hex "$IDENTITY" "$REG_CBE")"
+      "$(f_string challenge_id "$_ch_id")" \
+      "$(f_string pow_nonce "$_nonce")" \
+      "$(f_u64    timestamp "$_ts")")"
+  _sig="$(ed25519_sign_hex "$IDENTITY" "$_cbe")"
 
-  REG_BODY="$(cat <<JSON
+  cat > "$WORK/register.json" <<JSON
 {"registration":{"version":1,"agent_id":"$AGENT_ID",
- "public_key":"$(unhex "$AGENT_PUB_HEX" | b64u)","challenge_id":"$CH_ID",
- "pow_nonce":"$POW_NONCE","timestamp":$TS},"signature":"$REG_SIG"}
+ "public_key":"$(unhex "$AGENT_PUB_HEX" | b64u)","challenge_id":"$_ch_id",
+ "pow_nonce":"$_nonce","timestamp":$_ts},"signature":"$_sig"}
 JSON
-)"
-  http POST "$ORIGIN/v1/agents" "$REG_BODY" >/dev/null
-  echo "registered" >&2
+  http POST "$ORIGIN/v1/agents" "$WORK/register.json" >/dev/null
+  note "registered"
+}
+
+if ! curl -sf -o /dev/null --connect-timeout 10 --max-time 30 "$ORIGIN/v1/agents/$AGENT_ID"; then
+  register
 fi
 
-# ------------------------------------------------------------- ephemeral key
+# ------------------------------------------------------------ ephemeral key
 #
-# Generated here and never transmitted. The certificate is issued over its
-# public half, and that public half is covered by the proof below, so nobody in
-# the middle can swap it.
+# The certificate is issued over this public key, and the proof below covers
+# the key. Nobody in the middle can swap it.
 
 rm -f "$OUT/id_ed25519" "$OUT/id_ed25519.pub"
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$OUT/id_ed25519"
-# Exactly two whitespace-separated fields: the protocol signs this string
-# verbatim, so a comment or trailing space would change what is authenticated.
+# The protocol signs exactly two fields. A comment would change the bytes.
 SSH_PUB="$(cut -d' ' -f1,2 < "$OUT/id_ed25519.pub")"
+KEY_FP="$(ssh-keygen -lf "$OUT/id_ed25519.pub" | awk '{print $2}')"
 
-# ------------------------------------------------------------------ redemption
+# --------------------------------------------------------------- redemption
+#
+# One statement, two proofs: a signature that names the agent, and a MAC
+# that proves possession of the capability.
 
 TS="$(date -u +%s)"
 NONCE_HEX="$("$OPENSSL" rand -hex 16)"
 
-# The same eight fields under two different contexts. One statement, two
-# independent proofs: a signature that says which agent is asking, and a MAC
-# that proves possession of the capability.
 fields() {
   printf '%s%s%s%s%s%s%s%s' \
-    "$(f_u64   version 1)" \
+    "$(f_u64    version 1)" \
     "$(f_string host_id "$HOST_ID")" \
     "$(f_string grant_id "$GRANT_ID")" \
     "$(f_string agent_id "$AGENT_ID")" \
     "$(f_bytes  agent_public_key "$AGENT_PUB_HEX")" \
     "$(f_string ssh_public_key "$SSH_PUB")" \
-    "$(f_u64   timestamp "$TS")" \
+    "$(f_u64    timestamp "$TS")" \
     "$(f_bytes  nonce "$NONCE_HEX")"
 }
 SIG_CBE="$(cbe 'grantd/v1/redemption-agent-sig' 8 "$(fields)")"
@@ -368,39 +443,57 @@ MAC_CBE="$(cbe 'grantd/v1/redemption-proof' 8 "$(fields)")"
 
 AGENT_SIG="$(ed25519_sign_hex "$IDENTITY" "$SIG_CBE")"
 PROOF="$(hmac_hex "$SECRET_HEX" "$MAC_CBE")"
+unset SECRET_HEX
 
-BODY="$(cat <<JSON
+cat > "$WORK/redeem.json" <<JSON
 {"payload":{"version":1,"host_id":"$HOST_ID","grant_id":"$GRANT_ID",
  "agent_id":"$AGENT_ID","agent_public_key":"$(unhex "$AGENT_PUB_HEX" | b64u)",
  "ssh_public_key":"$SSH_PUB","timestamp":$TS,
  "nonce":"$(unhex "$NONCE_HEX" | b64u)"},
  "agent_signature":"$AGENT_SIG","proof":"$PROOF"}
 JSON
-)"
 
-RESP="$(http POST "$ORIGIN/v1/hosts/$HOST_ID/grants/$GRANT_ID/redeem" "$BODY")"
+RESP="$(http POST "$ORIGIN/v1/hosts/$HOST_ID/grants/$GRANT_ID/redeem" "$WORK/redeem.json")"
 
-# The certificate is the only thing worth extracting; everything else in the
-# response is connection detail.
+# ------------------------------------------------------- response checks
+#
+# The response is not signed. Every field must agree with the host's signed
+# registration, and the certificate must come from the host's CA.
+
 CERT="$(json_str "$RESP" certificate)"
-USER="$(json_str "$RESP" user)"
-HOSTNAME="$(json_str "$RESP" hostname)"
-PORT="$(json_num "$RESP" port)"
-printf '%s\n' "$CERT" > "$OUT/id_ed25519-cert.pub"
+[ "$(json_str "$RESP" user)" = "$USER" ] || die "response names a user the host did not sign"
+[ "$(json_str "$RESP" hostname)" = "$HOST" ] || die "response names a hostname the host did not sign"
+[ "$(json_num "$RESP" port)" = "$PORT" ] || die "response names a port the host did not sign"
+matches "$CERT" '^ssh-ed25519-cert-v01@openssh\.com [A-Za-z0-9+/]+=*$' || die "response carries no usable certificate"
+
+CERT_FILE="$OUT/id_ed25519-cert.pub"
+printf '%s\n' "$CERT" > "$CERT_FILE"
+CERT_INFO="$(ssh-keygen -Lf "$CERT_FILE")" || die "the certificate does not parse"
+
+cert_field() { printf '%s\n' "$CERT_INFO" | sed -n "s/^ *$1: *//p" | head -1; }
+cert_ca_fp() { cert_field 'Signing CA' | awk '{print $2}'; }
+cert_key_fp() { cert_field 'Public key' | awk '{print $2}'; }
+cert_principals() { printf '%s\n' "$CERT_INFO" | awk '/^ *Principals:/{f=1;next} f&&/^ *[A-Za-z ]+:/{f=0} f{print $1}'; }
+
+[ "$(cert_ca_fp)" = "$CA_FP" ] || die "the certificate was not signed by the host's CA"
+[ "$(cert_key_fp)" = "$KEY_FP" ] || die "the certificate is for a different key"
+[ "$(cert_principals)" = "$USER" ] || die "the certificate names principals other than $USER"
 
 echo "$RESP"
 
+# ---------------------------------------------------------------- connect
+
 if [ "$CONNECT" -eq 1 ]; then
   exec ssh -i "$OUT/id_ed25519" \
-    -o CertificateFile="$OUT/id_ed25519-cert.pub" \
+    -o CertificateFile="$CERT_FILE" \
     -o IdentitiesOnly=yes \
-    -p "$PORT" "$USER@$HOSTNAME" "$@"
+    -l "$USER" -p "$PORT" -- "$HOST" "$@"
 fi
 
 cat >&2 <<EOF
 
-ssh -i $OUT/id_ed25519 \\
-    -o CertificateFile=$OUT/id_ed25519-cert.pub \\
+ssh -i '$OUT/id_ed25519' \\
+    -o CertificateFile='$CERT_FILE' \\
     -o IdentitiesOnly=yes \\
-    -p $PORT $USER@$HOSTNAME
+    -l '$USER' -p $PORT -- '$HOST'
 EOF
