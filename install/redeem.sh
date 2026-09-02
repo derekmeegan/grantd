@@ -326,6 +326,59 @@ printf '%s\n' "$CA_PUB" > "$WORK/ca.pub"
 CA_FP="$(ssh-keygen -lf "$WORK/ca.pub" | awk '{print $2}')"
 note "target: $USER@$HOST:$PORT (signed by the host)"
 
+# ---------------------------------------------------------- reachability
+#
+# A grant is single use. Burning one and then finding that this machine
+# cannot open a session wastes it, so check the path to the host first.
+#
+# Sandboxes often have no raw TCP egress and reach the network only through
+# an HTTP CONNECT proxy. CONNECT builds a byte pipe, and SSH runs over it
+# unchanged, so a proxy that permits the host and port is a working path.
+
+probe() { # probe HOST PORT -> 0 if reachable
+  _proxy="${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}"
+  if [ -n "$_proxy" ]; then
+    _ph="$(printf '%s' "$_proxy" | sed 's|^[a-zA-Z]*://||; s|/.*$||; s|^.*@||')"
+    # -sS, not -s. Silent mode hides the message this check reads.
+    _err="$(curl -sS -o /dev/null --max-time 10 --proxytunnel -x "$_proxy" "https://$1:$2" 2>&1)"
+    _rc=$?
+    # A refused tunnel names the status. curl 8 says "CONNECT tunnel failed,
+    # response 403" and older curl says "code 403 from proxy after CONNECT".
+    # An open tunnel fails differently, because sshd sends a banner where curl
+    # expects a TLS handshake.
+    case "$_err" in
+      *"CONNECT tunnel failed"*|*"after CONNECT"*)
+        PROBE_DETAIL="proxy $_ph refused a tunnel to $1:$2 (HTTP $(printf '%s' "$_err" | sed -n 's/.*response \([0-9]*\).*/\1/p;s/.*code \([0-9]*\) from proxy.*/\1/p' | head -1))"
+        return 1 ;;
+    esac
+    case $_rc in
+      0|35|52|56) return 0 ;;
+      *) PROBE_DETAIL="proxy $_ph could not reach $1:$2 (curl $_rc)"; return 1 ;;
+    esac
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 8 "$1" "$2" >/dev/null 2>&1 && return 0
+    PROBE_DETAIL="no answer from $1:$2"; return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import socket,sys; socket.create_connection((sys.argv[1],int(sys.argv[2])),8).close()' "$1" "$2" 2>/dev/null && return 0
+    PROBE_DETAIL="no answer from $1:$2"; return 1
+  fi
+  return 0  # No probe tool. Continue rather than refuse.
+}
+
+if [ "${GRANTD_NO_PROBE:-0}" != 1 ] && ! probe "$HOST" "$PORT"; then
+  die "this machine cannot reach $HOST:$PORT, so the session could not be opened.
+  $PROBE_DETAIL
+The grant was NOT spent. It is still valid until it expires.
+
+grantd needs a path to the host's SSH port. Either raw outbound TCP, or an
+HTTP CONNECT proxy in HTTPS_PROXY that permits this host and port.
+  If the host listens only on 22, ask its operator to re-run the installer
+  with --listen-port 443, which most sandboxes allow.
+  Set GRANTD_NO_PROBE=1 to redeem anyway."
+fi
+
 # ------------------------------------------------------------------ identity
 
 if [ ! -f "$IDENTITY" ]; then

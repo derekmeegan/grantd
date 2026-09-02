@@ -22,6 +22,7 @@ import { createHmac, createHash, createPrivateKey, createPublicKey, generateKeyP
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir, homedir } from "node:os";
+import { connect as tcpConnect } from "node:net";
 
 const PROTOCOL_VERSION = 1;
 const SECRET_BYTES = 32;
@@ -272,6 +273,61 @@ function verifyHostRecord(hostId, record) {
   return { ...reg, caKey: caReader.string() };
 }
 
+// -------------------------------------------------------------- reachability
+//
+// A grant is single use. Burning one and then finding that this machine cannot
+// open a session wastes it, so check the path to the host's SSH port first.
+//
+// Many agent sandboxes have no raw TCP egress and reach the network only
+// through an HTTP CONNECT proxy. CONNECT builds a byte pipe once established,
+// and SSH runs over it unchanged, so a proxy that allows the host and port is
+// a working path.
+
+function proxyFromEnv() {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy;
+  if (!raw) return null;
+  try {
+    const u = new URL(raw.includes("://") ? raw : `http://${raw}`);
+    return { host: u.hostname, port: Number(u.port || 8080), auth: u.username ? `${u.username}:${u.password}` : null };
+  } catch { return null; }
+}
+
+function probeDirect(host, port, timeout) {
+  return new Promise((resolve) => {
+    const s = tcpConnect({ host, port, timeout });
+    const done = (ok, detail) => { s.destroy(); resolve({ ok, detail }); };
+    s.on("connect", () => done(true, "direct TCP"));
+    s.on("timeout", () => done(false, `no answer from ${host}:${port} within ${timeout}ms`));
+    s.on("error", (e) => done(false, e.message));
+  });
+}
+
+function probeProxy(proxy, host, port, timeout) {
+  return new Promise((resolve) => {
+    const s = tcpConnect({ host: proxy.host, port: proxy.port, timeout });
+    let buf = "";
+    const done = (ok, detail) => { s.destroy(); resolve({ ok, detail }); };
+    s.on("connect", () => {
+      const auth = proxy.auth ? `Proxy-Authorization: Basic ${Buffer.from(proxy.auth).toString("base64")}\r\n` : "";
+      s.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
+    });
+    s.on("data", (d) => {
+      buf += d.toString("latin1");
+      if (!buf.includes("\r\n\r\n")) return;
+      const status = buf.split("\r\n")[0];
+      done(/ 2\d\d /.test(status + " "), `proxy ${proxy.host}:${proxy.port} said "${status.trim()}"`);
+    });
+    s.on("timeout", () => done(false, `proxy ${proxy.host}:${proxy.port} did not answer`));
+    s.on("error", (e) => done(false, `proxy ${proxy.host}:${proxy.port}: ${e.message}`));
+  });
+}
+
+async function probeReachable(host, port, timeout = 8000) {
+  const proxy = proxyFromEnv();
+  const result = proxy ? await probeProxy(proxy, host, port, timeout) : await probeDirect(host, port, timeout);
+  return { ...result, viaProxy: Boolean(proxy) };
+}
+
 // ----------------------------------------------------------------- identity
 
 function loadIdentity(path) {
@@ -334,6 +390,7 @@ function parseArgs(argv) {
     if (a === "--out") opts.out = argv[++i];
     else if (a === "--identity") opts.identity = argv[++i];
     else if (a === "--json") opts.json = true;
+    else if (a === "--no-probe") opts.noProbe = true;
     else if (a === "-h" || a === "--help") opts.help = true;
     else if (a === "-") opts.url = readFileSync(0, "utf8").trim();
     else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
@@ -346,7 +403,7 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const log = (m) => { if (!opts.json) console.error(m); };
   if (opts.help || !opts.url) {
-    console.error("usage: node redeem.mjs [URL] [--out DIR] [--identity FILE] [--json]");
+    console.error("usage: node redeem.mjs [URL] [--out DIR] [--identity FILE] [--json] [--no-probe]");
     console.error("       the URL may also come from GRANTD_CAPABILITY, or from stdin with '-'");
     process.exit(2);
   }
@@ -362,6 +419,27 @@ async function main() {
   // own signed registration, never from the redemption response.
   const host = verifyHostRecord(cap.hostId, await api("GET", `${cap.origin}/v1/hosts/${cap.hostId}`));
   log(`target: ${host.ssh_user}@${host.hostname}:${host.ssh_port} (signed by the host)`);
+
+  // Check the path to the host before spending the grant.
+  if (!opts.noProbe) {
+    const probe = await probeReachable(host.hostname, host.ssh_port);
+    if (!probe.ok) {
+      throw new Error(
+`this machine cannot reach ${host.hostname}:${host.ssh_port}, so the session could not be opened.
+  ${probe.detail}
+The grant was NOT spent. It is still valid until it expires.
+
+grantd needs a path to the host's SSH port. Either raw outbound TCP, or an
+HTTP CONNECT proxy in HTTPS_PROXY that permits this host and port.
+${probe.viaProxy
+  ? "  A proxy was used. Ask for " + host.hostname + ":" + host.ssh_port + " to be allowed through it."
+  : "  No HTTPS_PROXY is set. If this machine has a proxy, set it and try again."}
+  If the host listens only on 22, ask its operator to re-run the installer
+  with --listen-port 443, which most sandboxes allow.
+  Pass --no-probe to redeem anyway.`);
+    }
+    log(`reachable: ${host.hostname}:${host.ssh_port} via ${probe.viaProxy ? "HTTP CONNECT proxy" : "direct TCP"}`);
+  }
 
   const identity = loadIdentity(opts.identity);
   const agentId = idOf("a", identity.raw);

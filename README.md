@@ -160,7 +160,24 @@ sudo ./uninstall.sh --yes
 ### Requirements
 
 **Host:** Linux, systemd, OpenSSH, `amd64` or `arm64`, outbound HTTPS.
-**Visitor:** `curl`, `ssh`, and OpenSSL 3.x.
+
+**Visitor:** a path to the host's SSH port, plus either `curl`, `ssh` and
+OpenSSL 3.x, or Node 18 and an SSH client library.
+
+That first requirement is the one that disqualifies most agent sandboxes, so it
+is worth stating plainly. SSH is never proxied through the coordination
+service, so the visitor must be able to open a connection to the host itself.
+Raw outbound TCP satisfies this. So does an HTTP `CONNECT` proxy named in
+`HTTPS_PROXY`, because `CONNECT` builds a byte pipe and SSH runs over it
+unchanged. Many sandboxes allow `CONNECT` only to port 443, which is why the
+installer takes `--listen-port 443`.
+
+Both redeemers check that path before they spend the grant and refuse with an
+explanation rather than handing back a certificate that cannot be used.
+
+If a sandbox has a JavaScript runtime and no package manager, use
+[`install/redeem.mjs`](install/redeem.mjs). It needs no dependencies and no
+binaries, not even `openssl` or `ssh-keygen`.
 
 macOS ships LibreSSL as `openssl`, which has no Ed25519 at all. `redeem.sh`
 looks for a capable binary in the usual places and says so plainly if there is
