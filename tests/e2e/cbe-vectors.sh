@@ -28,6 +28,11 @@ VECTORS="${2:?usage: cbe-vectors.sh <redeem.sh> <v1.json>}"
 # Pull the encoding and CBE helpers out of the shipped script, so this checks
 # the real thing rather than a copy that could drift. The range stops before the
 # capability-URL parsing, which expects arguments this test does not supply.
+# Pull in the helpers verbatim, including the OpenSSL selection: on macOS the
+# default `openssl` is LibreSSL and cannot do Ed25519, so a check that used it
+# would be testing a different binary than the script does.
+eval "$(sed -n '/^find_openssl()/,/^}/p' "$REDEEM")"
+OPENSSL="$(find_openssl)" || { echo "no Ed25519-capable OpenSSL found" >&2; exit 1; }
 eval "$(sed -n '/^hexof()/,/^raw_pubkey_hex()/p' "$REDEEM" | sed '$d')"
 
 vec() { jq -r --arg c "$1" --arg f "$2" '.vectors[] | select(.context == $c) | .[$f]' "$VECTORS"; }

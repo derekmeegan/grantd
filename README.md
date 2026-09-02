@@ -82,15 +82,23 @@ web/               static landing page
 | `tests/install/run.sh` | Docker + systemd | install, sandbox, uninstall, SSH survival |
 | `tests/install/release.sh` | Docker + systemd | install from a signed release; tampered and wrongly-signed artifacts |
 | `tests/vm/run.sh` | **Lima VM, Ubuntu LTS** | **reboot**, unprivileged sandbox, daemon offline and back, service unreachable |
+| `.github/workflows/ci.yml` | **real amd64 VM** | the installer run natively; the systemd sandbox on amd64 |
+| `tests/remote/run.sh` | **a host you supply** | a real network path between visitor and host |
 
 The VM suite exists because containers cannot reboot, and `protocol/v1.md` §12
 makes claims that only a reboot can test. It also reaches the machine over SSH,
 so "the installer must not brick sshd" is finally tested where breaking it
 costs the test its own access.
 
-Not yet tested: a host with a public IP where SSH loss is unrecoverable, and
-the systemd sandbox on amd64 (qemu cannot create the namespace; the suite
-reports that as skipped rather than relaxing the unit).
+`tests/remote/run.sh user@host` is the only one needing something this
+repository cannot provide: a machine with an address the visitor can route to.
+Everything else puts host and visitor on the same box, so the SSH connection
+never actually leaves it. Point it at a disposable host — it installs grantd and
+edits that machine's sshd, which is the point.
+
+The redeemer needs **OpenSSL 3.x**. macOS ships LibreSSL as `openssl`, which has
+no Ed25519 at all; `redeem.sh` looks for a capable binary in the usual places and
+says so plainly if there is none. Set `GRANTD_OPENSSL` to override.
 
 ## Status
 

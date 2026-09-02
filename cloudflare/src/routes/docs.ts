@@ -150,6 +150,10 @@ whole flow with curl, openssl and ssh-keygen, and nothing else:
 
   curl -sO ${origin}/redeem.sh && sh redeem.sh '<the full URL, including #secret>'
 
+It needs OpenSSL 3.x. macOS ships LibreSSL as 'openssl', which cannot do
+Ed25519 at all; the script looks for a capable binary and tells you if it
+cannot find one.
+
 Notes.
 
   The grant is single-use, with no retry path. The first agent to present a

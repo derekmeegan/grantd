@@ -43,11 +43,43 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$CAP" ] || usage
 
-for tool in curl openssl ssh-keygen od base32 sed tr awk; do
+for tool in curl ssh-keygen od sed tr awk; do
   command -v "$tool" >/dev/null 2>&1 || { echo "redeem.sh needs $tool" >&2; exit 1; }
 done
 
 die() { echo "redeem.sh: $*" >&2; exit 1; }
+
+# Find an OpenSSL that can actually do Ed25519.
+#
+# macOS ships LibreSSL as `openssl`, and LibreSSL has no Ed25519 at all: it
+# fails with "Algorithm ed25519 not found" while still exiting 0, so a naive
+# `command -v openssl` check passes and the script dies later with no
+# explanation. Every Linux distro ships OpenSSL 3.x, which is why this only
+# shows up on a laptop — and a laptop is exactly where a visiting agent runs.
+#
+# The capability is tested rather than the version string parsed, because that
+# is the thing actually needed.
+find_openssl() {
+  for candidate in \
+      "${GRANTD_OPENSSL:-}" \
+      openssl openssl3 \
+      /opt/homebrew/opt/openssl@3/bin/openssl \
+      /opt/homebrew/opt/openssl/bin/openssl \
+      /usr/local/opt/openssl@3/bin/openssl \
+      /opt/local/bin/openssl; do
+    [ -n "$candidate" ] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" genpkey -algorithm ed25519 -out /dev/null >/dev/null 2>&1; then
+      printf '%s' "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+OPENSSL="$(find_openssl)" || die "no OpenSSL with Ed25519 support found.
+  openssl on this machine is $(openssl version 2>/dev/null || echo 'missing').
+  macOS ships LibreSSL, which cannot do Ed25519 — install OpenSSL 3
+  (brew install openssl@3) or set GRANTD_OPENSSL to a capable binary."
 
 # Every HTTP call goes through this. `set -e` plus `curl -sf` would otherwise
 # exit with no output at all, which is the worst possible failure mode for a
@@ -117,14 +149,14 @@ unhex() {
     }'
 }
 
-b64u()   { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+b64u()   { "$OPENSSL" base64 -A | tr '+/' '-_' | tr -d '='; }
 b64u_decode_hex() {
   # base64url -> hex, restoring the padding the encoding drops.
   # LC_ALL=C throughout: every tool here handles bytes, not text.
   _s="$(printf '%s' "$1" | tr '\-_' '+/')"
   _pad=$(( (4 - ${#_s} % 4) % 4 ))
   while [ "$_pad" -gt 0 ]; do _s="${_s}="; _pad=$((_pad - 1)); done
-  printf '%s' "$_s" | openssl base64 -d -A | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
+  printf '%s' "$_s" | "$OPENSSL" base64 -d -A | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
 }
 
 # Pull one string or number out of a JSON object. Deliberately not a JSON
@@ -156,26 +188,53 @@ cbe() {
 
 ed25519_sign_hex() { # <pem> <hex message> -> base64url signature
   _tmp="$(mktemp)"; unhex "$2" > "$_tmp"
-  openssl pkeyutl -sign -inkey "$1" -rawin -in "$_tmp" | b64u
+  "$OPENSSL" pkeyutl -sign -inkey "$1" -rawin -in "$_tmp" | b64u
   rm -f "$_tmp"
 }
 
 hmac_hex() { # <hex key> <hex message> -> base64url mac
   _tmp="$(mktemp)"; unhex "$2" > "$_tmp"
-  openssl dgst -sha256 -mac HMAC -macopt "hexkey:$1" -binary "$_tmp" | b64u
+  "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:$1" -binary "$_tmp" | b64u
   rm -f "$_tmp"
 }
 
-# agent_id = "a_" || base32(sha256(pub)[0:20]), lowercase RFC 4648, no padding.
-# Standard base32's alphabet is this one uppercased, so lowercasing is the whole
-# conversion.
+# base32, RFC 4648, lowercase, no padding — implemented here rather than shelled
+# out to base32(1), which is GNU coreutils and absent on macOS and the BSDs. A
+# visiting agent is often on a laptop, and "install coreutils first" is exactly
+# the kind of dependency this script exists to avoid.
+#
+# It consumes hex so no binary crosses a pipe, and it masks the accumulator after
+# every emitted character so the running value stays under 2^7 instead of growing
+# to a 160-bit number awk would render as a float.
+b32_from_hex() {
+  printf '%s' "$1" | LC_ALL=C awk '
+    BEGIN { A = "abcdefghijklmnopqrstuvwxyz234567"; H = "0123456789abcdef" }
+    {
+      val = 0; bits = 0; out = ""
+      for (i = 1; i <= length($0); i += 2) {
+        b = (index(H, substr($0, i, 1)) - 1) * 16 + index(H, substr($0, i + 1, 1)) - 1
+        val = val * 256 + b
+        bits += 8
+        while (bits >= 5) {
+          shift = bits - 5
+          out = out substr(A, int(val / (2 ^ shift)) % 32 + 1, 1)
+          val = val % (2 ^ shift)
+          bits = shift
+        }
+      }
+      if (bits > 0) out = out substr(A, (val * (2 ^ (5 - bits))) % 32 + 1, 1)
+      print out
+    }'
+}
+
+# agent_id = "a_" || base32(sha256(pub)[0:20])
 agent_id_of() {
-  unhex "$1" | openssl dgst -sha256 -binary | head -c 20 \
-    | base32 | tr -d '=\n' | LC_ALL=C tr 'A-Z' 'a-z' | sed 's/^/a_/'
+  _d="$(unhex "$1" | "$OPENSSL" dgst -sha256 -binary | LC_ALL=C od -An -tx1 -v -N 20 | tr -d ' \n')"
+  printf 'a_%s' "$(b32_from_hex "$_d")"
 }
 
 raw_pubkey_hex() { # <pem> -> 32 raw ed25519 public key bytes, hex
-  openssl pkey -in "$1" -pubout -outform DER | tail -c 32 | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
+  "$OPENSSL" pkey -in "$1" -pubout -outform DER | tail -c 32 | LC_ALL=C od -An -tx1 -v | tr -d ' \n'
 }
 
 # --------------------------------------------------------------- capability URL
@@ -203,7 +262,7 @@ echo "origin: $ORIGIN" >&2
 
 if [ ! -f "$IDENTITY" ]; then
   mkdir -p "$(dirname "$IDENTITY")"
-  ( umask 077; openssl genpkey -algorithm ed25519 -out "$IDENTITY" 2>/dev/null )
+  ( umask 077; "$OPENSSL" genpkey -algorithm ed25519 -out "$IDENTITY" 2>/dev/null )
   echo "generated a new agent identity at $IDENTITY" >&2
 fi
 AGENT_PUB_HEX="$(raw_pubkey_hex "$IDENTITY")"
@@ -237,7 +296,7 @@ PY
   zeros="$(printf '0%.0s' $(seq 1 $(( bits / 4 ))))"
   while :; do
     unhex "$prefix_hex" > "$tmp"; printf '%s' "$i" >> "$tmp"
-    digest="$(openssl dgst -sha256 -binary "$tmp" | od -An -tx1 -v | tr -d ' \n')"
+    digest="$("$OPENSSL" dgst -sha256 -binary "$tmp" | od -An -tx1 -v | tr -d ' \n')"
     case "$digest" in "$zeros"*) printf '%s' "$i"; rm -f "$tmp"; return ;; esac
     i=$((i + 1))
   done
@@ -288,7 +347,7 @@ SSH_PUB="$(cut -d' ' -f1,2 < "$OUT/id_ed25519.pub")"
 # ------------------------------------------------------------------ redemption
 
 TS="$(date -u +%s)"
-NONCE_HEX="$(openssl rand -hex 16)"
+NONCE_HEX="$("$OPENSSL" rand -hex 16)"
 
 # The same eight fields under two different contexts. One statement, two
 # independent proofs: a signature that says which agent is asking, and a MAC
