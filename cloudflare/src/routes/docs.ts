@@ -167,28 +167,3 @@ Notes.
   still valid until it expires; try again.
 `;
 }
-
-export function installScript(origin: string): string {
-  return `#!/bin/sh
-# grantd installer bootstrap.
-#
-# This fetches the real installer and its signature from the release bucket and
-# refuses to run anything it cannot verify. Piping this straight into a shell is
-# the convention; read it first if you would rather not.
-set -eu
-
-ORIGIN="${origin}"
-VERSION="\${GRANTD_VERSION:-latest}"
-
-echo "grantd installer" >&2
-echo "  origin:  $ORIGIN" >&2
-echo "  version: $VERSION" >&2
-echo >&2
-echo "Fetch install/install.sh from the repository and run it with:" >&2
-echo "  sudo ./install.sh --origin $ORIGIN --ssh-user <account> --hostname <address>" >&2
-echo >&2
-echo "Automatic updates are deliberately not implemented: a compromise of this" >&2
-echo "release infrastructure must not become a path onto customer machines." >&2
-exit 0
-`;
-}

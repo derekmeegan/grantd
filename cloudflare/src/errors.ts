@@ -67,6 +67,28 @@ export function jsonResponse(body: unknown, status = 200, headers: HeadersInit =
   });
 }
 
-export function textResponse(body: string, status = 200, contentType = "text/plain; charset=utf-8"): Response {
-  return new Response(body, { status, headers: { "content-type": contentType } });
+export function textResponse(
+  body: string,
+  status = 200,
+  contentType = "text/plain; charset=utf-8",
+  extraHeaders: HeadersInit = {},
+): Response {
+  return new Response(body, {
+    status,
+    headers: { "content-type": contentType, ...extraHeaders },
+  });
+}
+
+/**
+ * Scripts people pipe into a shell are served uncached.
+ *
+ * The edge will happily hold an old copy otherwise, which means a fix deployed
+ * to install.sh or redeem.sh does not reach anyone for minutes — and the person
+ * running it has no way to tell which version they got. For a script that
+ * modifies sshd, "you ran the previous one" is not an acceptable ambiguity.
+ */
+export function scriptResponse(body: string): Response {
+  return textResponse(body, 200, "text/x-shellscript; charset=utf-8", {
+    "cache-control": "no-store, must-revalidate",
+  });
 }

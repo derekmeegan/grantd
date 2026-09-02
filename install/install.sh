@@ -27,11 +27,21 @@ SSHD_SNIPPET=/etc/ssh/sshd_config.d/60-grantd.conf
 CA_PUB=/etc/ssh/grantd_user_ca.pub
 TMPFILES=/usr/lib/tmpfiles.d/grantd.conf
 
-# The release signing key. Its private half lives offline, on a hardware token
-# or an air-gapped machine, and deliberately not in the release infrastructure:
-# if a compromise of the build or distribution system were sufficient to sign a
-# release, the signature would be decoration.
-RELEASE_SIGNER_KEY="${GRANTD_RELEASE_KEY:-}"
+# The release signing key, embedded so this script is a self-contained artifact.
+# Its private half lives offline — on a hardware token or an air-gapped machine,
+# and deliberately not in the release infrastructure. If a compromise of the
+# build or distribution system were enough to sign a release, the signature
+# would be decoration.
+#
+# Be clear about what this buys, since it is easy to overstate. Embedding the
+# key means the trust anchor travels with the script rather than being fetched
+# from the same bucket as the artifacts it is meant to vouch for — that
+# arrangement would be circular and worthless. It does not make `curl | sh` from
+# an origin safe: at that moment you are trusting the origin to hand you an
+# honest script. The signature's real value is when this script arrives some
+# other way — a git checkout, a package, a copy you have read — and the release
+# bucket is the thing you are unsure about.
+RELEASE_SIGNER_KEY="${GRANTD_RELEASE_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN+NinC05+tSWFnXFK1Fkb7H0t5emBjKJKgd/ZSKO7UP grantd release signing (test)}"
 
 usage() {
   cat >&2 <<USAGE
@@ -202,7 +212,6 @@ else
   # Signature first, then hashes. Verifying hashes against an unsigned SHA256SUMS
   # proves only that the download was not corrupted, which is not the question.
   log "verifying the release signature"
-  [ -n "$RELEASE_SIGNER_KEY" ] || RELEASE_SIGNER_KEY="$(cat "$(dirname "$0")/release-signing-key.pub" 2>/dev/null || true)"
   [ -n "$RELEASE_SIGNER_KEY" ] || die "no release signing key available; refusing to install an unverified release"
   printf 'grantd-release %s\n' "$RELEASE_SIGNER_KEY" > "$WORK/allowed_signers"
   ssh-keygen -Y verify -f "$WORK/allowed_signers" -I grantd-release -n grantd-release \
@@ -319,13 +328,141 @@ fi
 # --------------------------------------------------------------------- units
 
 log "installing systemd units"
-UNIT_SRC="$(dirname "$0")/systemd"
-if [ -d "$UNIT_SRC" ]; then
-  install -m 0644 "$UNIT_SRC/grant-signer.service" /etc/systemd/system/grant-signer.service
-  install -m 0644 "$UNIT_SRC/grantd.service" /etc/systemd/system/grantd.service
-else
-  die "systemd unit files not found next to install.sh"
-fi
+# The units live here rather than in adjacent files, so this script is a single
+# self-contained artifact that works when curled. Two copies of a unit that
+# confines the trust root is two copies that can drift apart, and the one that
+# matters is whichever the installer happened to write.
+cat > /etc/systemd/system/grant-signer.service <<'GRANT_SIGNER_UNIT'
+[Unit]
+Description=grantd signer (local trust root)
+Documentation=https://github.com/derekmeegan/grantd
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=grantd.service
+
+[Service]
+Type=simple
+User=grantsigner
+Group=grantsigner
+
+# The socket directories come from /usr/lib/tmpfiles.d/grantd.conf, which
+# systemd-tmpfiles-setup.service applies at boot — /run is a tmpfs, so they are
+# recreated every time. They are setgid, so the unprivileged signer ends up with
+# owner.sock in the owner's group and redeem.sock in the daemon's, needing
+# neither CAP_CHOWN nor membership in either group.
+#
+# This unit deliberately does not re-run systemd-tmpfiles itself. Doing so spawns
+# a privileged helper inside this unit's sandbox on every start, which is both
+# redundant and a failure mode of its own: the spawn has to set up the private
+# network namespace before it can run, and when that fails the trust root does
+# not start at all.
+ExecStart=/usr/local/lib/grantd/grant-signer serve \
+    --owner-sock /run/grantd/owner/owner.sock \
+    --daemon-sock /run/grantd/redeem/redeem.sock \
+    --owner-uid ${GRANTD_OWNER_UID} \
+    --owner-gid ${GRANTD_OWNER_GID} \
+    --daemon-uid ${GRANTD_DAEMON_UID} \
+    --daemon-gid ${GRANTD_DAEMON_GID}
+EnvironmentFile=/etc/grantd/signer.env
+
+Restart=always
+RestartSec=2
+
+# This process holds the SSH CA key and the host identity key. It has no reason
+# to ever touch the network, so it is placed in a namespace where it cannot:
+# PrivateNetwork leaves it with loopback only, and AF_UNIX is the only address
+# family it can even open. Unix sockets are filesystem objects and keep working.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/grant-signer /run/grantd
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# @privileged stays denied. The signer never needs to chown anything: the socket
+# directories are setgid, so the kernel assigns the right group at creation, and
+# the signer verifies that rather than changing it. A denied syscall under
+# seccomp raises SIGSYS and kills the process rather than returning an error, so
+# "deny it and let the code fall back" is not an option — the code has to not
+# make the call.
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+GRANT_SIGNER_UNIT
+cat > /etc/systemd/system/grantd.service <<'GRANTD_UNIT'
+[Unit]
+Description=grantd daemon (coordination rendezvous)
+Documentation=https://github.com/derekmeegan/grantd
+After=network-online.target grant-signer.service
+Wants=network-online.target
+Requires=grant-signer.service
+
+[Service]
+Type=simple
+User=grantd
+Group=grantd
+
+# The origin lives in a public file, not in /etc/grantd. That directory holds
+# both private keys and is made invisible to this process below, so anything the
+# daemon needs to read has to live outside it.
+ExecStart=/usr/local/lib/grantd/grantd \
+    --signer-sock /run/grantd/redeem/redeem.sock \
+    --origin-file /etc/grantd.conf
+
+Restart=always
+RestartSec=2
+
+# This is the process the threat model assumes gets compromised. It needs
+# outbound TCP and one Unix socket, and nothing else — so it is given nothing
+# else. In particular /etc/grantd, which holds both private keys, is made
+# invisible to it, on top of the file permissions that already exclude it.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+InaccessiblePaths=/etc/grantd /var/lib/grant-signer /run/grantd/owner
+ReadWritePaths=/run/grantd/redeem
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+GRANTD_UNIT
+chmod 0644 /etc/systemd/system/grant-signer.service /etc/systemd/system/grantd.service
 systemctl daemon-reload
 systemctl enable --now grant-signer.service >/dev/null
 systemctl enable --now grantd.service >/dev/null

@@ -9,13 +9,14 @@
  * access is a secret it never receives.
  */
 
-import { ERR, errorResponse, jsonResponse, textResponse } from "./errors";
+import { ERR, errorResponse, jsonResponse, scriptResponse, textResponse } from "./errors";
 import { AGENT_ID_RE, GRANT_ID_RE, HOST_ID_RE, newChallengeId } from "./crypto/ids";
 import { MAX_REQUEST_BYTES } from "./protocol";
-import { docsMarkdown, grantInstructions, installScript } from "./routes/docs";
+import { docsMarkdown, grantInstructions } from "./routes/docs";
 // Imported as text so there is exactly one copy of this script in the
 // repository: the one install/ ships and the test suite runs.
 import redeemScript from "../../install/redeem.sh";
+import installScriptFile from "../../install/install.sh";
 import type { Env, RateLimiter } from "./env";
 
 export { HostDO } from "./durable-objects/host";
@@ -45,10 +46,10 @@ async function route(request: Request, env: Env, _ctx: ExecutionContext): Promis
     return jsonResponse({ ok: true, protocol_version: 1 });
   }
   if (request.method === "GET" && seg[0] === "redeem.sh") {
-    return textResponse(redeemScript, 200, "text/x-shellscript; charset=utf-8");
+    return scriptResponse(redeemScript);
   }
   if (request.method === "GET" && seg[0] === "install") {
-    return textResponse(installScript(origin), 200, "text/x-shellscript; charset=utf-8");
+    return scriptResponse(installScriptFile);
   }
 
   // Human- and agent-readable capability landing page. The secret is in the

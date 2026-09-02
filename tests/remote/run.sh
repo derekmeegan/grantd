@@ -106,7 +106,7 @@ rsudo "id $SSH_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $SSH_USER" \
 # about.
 rsh 'rm -rf ~/grantd-install && mkdir -p ~/grantd-install'
 ( cd "$REPO/install" && COPYFILE_DISABLE=1 tar --no-xattrs -cf - \
-    install.sh uninstall.sh redeem.sh release-signing-key.pub systemd 2>/dev/null ) \
+    install.sh uninstall.sh redeem.sh 2>/dev/null ) \
   | rsh 'tar -C ~/grantd-install -xf -'
 rsudo 'rm -rf /opt/grantd-install && mv ~'"$(rsh 'echo $USER')"'/grantd-install /opt/grantd-install \
        && chown -R root:root /opt/grantd-install \
