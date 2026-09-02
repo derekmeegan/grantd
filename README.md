@@ -84,17 +84,29 @@ web/               static landing page
 | `tests/vm/run.sh` | **Lima VM, Ubuntu LTS** | **reboot**, unprivileged sandbox, daemon offline and back, service unreachable |
 | `.github/workflows/ci.yml` | **real amd64 VM** | the installer run natively; the systemd sandbox on amd64 |
 | `tests/remote/run.sh` | **a host you supply** | a real network path between visitor and host |
+| `tests/remote/digitalocean.sh` | **a throwaway droplet** | the above, provisioned and destroyed automatically |
 
 The VM suite exists because containers cannot reboot, and `protocol/v1.md` §12
 makes claims that only a reboot can test. It also reaches the machine over SSH,
 so "the installer must not brick sshd" is finally tested where breaking it
 costs the test its own access.
 
-`tests/remote/run.sh user@host` is the only one needing something this
-repository cannot provide: a machine with an address the visitor can route to.
-Everything else puts host and visitor on the same box, so the SSH connection
-never actually leaves it. Point it at a disposable host — it installs grantd and
-edits that machine's sshd, which is the point.
+`tests/remote/run.sh user@host` needs something no container can provide: a
+machine with an address the visitor can route to. Everything else puts host and
+visitor on the same box, so the SSH connection never actually leaves it. Point
+it at a disposable host — it installs grantd and edits that machine's sshd,
+which is the point.
+
+`tests/remote/digitalocean.sh` does that end to end: provisions a droplet, runs
+the suite, and destroys everything on any exit path including failure. About a
+cent, about five minutes.
+
+    DIGITALOCEAN_TOKEN=dop_v1_... tests/remote/digitalocean.sh
+
+There is no Cloudflare product that can host this side of the test. Workers do
+accept inbound TCP now, but that path runs through Spectrum — and the property
+being tested is precisely that Cloudflare is *not* in the path, so a proxied
+connection would verify the opposite of the design.
 
 The redeemer needs **OpenSSL 3.x**. macOS ships LibreSSL as `openssl`, which has
 no Ed25519 at all; `redeem.sh` looks for a capable binary in the usual places and
