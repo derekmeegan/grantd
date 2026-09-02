@@ -479,7 +479,7 @@ describe("redemption routing", () => {
     expect(await errCode(res)).toBe("GRANT_NOT_FOUND");
   });
 
-  it("caps redemption attempts per grant, which an edge rule keyed on IP cannot do", async () => {
+  it("caps redemption attempts per grant, which an edge rule keyed on IP cannot do", { timeout: 60_000 }, async () => {
     const host = await TestHost.create();
     const agent = await TestAgent.registered();
     await host.register();
@@ -502,7 +502,9 @@ describe("redemption routing", () => {
     ws.close();
   });
 
-  it("caps redemption attempts per host across many grants", async () => {
+  // 70 sequential redemptions through real Durable Objects. The default 5s
+  // timeout is a local-machine assumption and fails on a slower CI runner.
+  it("caps redemption attempts per host across many grants", { timeout: 120_000 }, async () => {
     const host = await TestHost.create();
     const agent = await TestAgent.registered();
     await host.register();

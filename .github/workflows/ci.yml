@@ -80,7 +80,11 @@ jobs:
           test "$(uname -m)" = "x86_64"
           # Not a container: the sandbox assertions below are only meaningful on
           # a machine where systemd can actually build namespaces.
-          test "$(systemd-detect-virt --container || echo none)" = "none"
+          #
+          # systemd-detect-virt prints "none" *and* exits non-zero when there is
+          # no container, so `|| echo none` would append a second "none" and the
+          # comparison would never match.
+          test "$(systemd-detect-virt --container 2>/dev/null || true)" = "none"
           sudo systemd-run --quiet --pipe --property=PrivateNetwork=yes /bin/true
           echo "systemd can create private network namespaces"
 
