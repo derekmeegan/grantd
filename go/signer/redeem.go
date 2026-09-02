@@ -25,23 +25,17 @@ func redeemErr(code, format string, args ...any) *RedeemError {
 	return &RedeemError{Code: code, Message: fmt.Sprintf(format, args...)}
 }
 
-// Redeem is the only function in the system that can turn a network-delivered
-// message into SSH access.
-//
-// Every check below assumes the caller is hostile. The daemon that delivered
-// this envelope may be compromised, and the coordination service that routed it
-// definitely may be. Nothing either of them asserts is trusted: the host ID is
-// compared to our own, the agent ID is recomputed from the agent's public key,
-// the SSH principal comes from local enrollment rather than the request, and
-// the authority to issue anything at all rests entirely on an HMAC that only a
-// holder of the locally stored grant secret could have produced.
+// Redeem is the only function that can turn a network message into SSH
+// access. It treats the daemon and the coordination service as hostile.
+// The host ID is compared to our own, the agent ID is recomputed from the
+// agent's key, the principal comes from local enrollment, and only a valid
+// HMAC under the stored grant secret can authorize issuance.
 func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (protocol.RedemptionResponse, error) {
 	now := s.now()
 	nowSec := now.Unix()
 	p := req.Payload
 
-	// --- Cheap, allocation-free-ish checks first. None of these touch the
-	// --- database, so an unauthenticated flood cannot cause write load.
+	// Cheap checks first. None of these write to the database.
 
 	if p.Version != protocol.Version {
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeUnsupportedVersion,
@@ -56,9 +50,8 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 		return protocol.RedemptionResponse{}, err
 	}
 	if p.HostID != h.HostID {
-		// A redemption addressed to a different machine. Refuse rather than
-		// treat it as ours: this is what stops a coordination service from
-		// replaying one host's traffic at another.
+		// Refuse a redemption addressed to another machine. This stops the
+		// service from replaying one host's traffic at another.
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeIDMismatch,
 			"redemption is addressed to a different host")
 	}
@@ -77,7 +70,7 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeBadRequest,
 			"agent public key must be %d bytes", ed25519.PublicKeySize)
 	}
-	// The agent ID is a hash of the agent's key, so it is checked, not believed.
+	// The agent ID is a hash of the agent's key. Recompute it.
 	if err := protocol.CheckAgentID(p.AgentID, p.AgentPublicKey); err != nil {
 		return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeIDMismatch,
 			"agent_id does not match agent_public_key")
@@ -98,8 +91,8 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 	}
 	keyFP := protocol.SSHKeyFingerprint(sshKey)
 
-	// --- Replay. A nonce is remembered for longer than the skew window, so a
-	// --- captured envelope cannot be resubmitted while it is still fresh.
+	// Replay check. Nonces live longer than the skew window, so a captured
+	// envelope cannot be resent while it is still fresh.
 	if err := s.store.RememberNonce(ctx, "redeem", p.Nonce, nowSec, NonceRetention); err != nil {
 		if errors.Is(err, store.ErrNonceReplay) {
 			return protocol.RedemptionResponse{}, redeemErr(protocol.ErrCodeReplayedNonce,
@@ -108,8 +101,8 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 		return protocol.RedemptionResponse{}, err
 	}
 
-	// --- The authoritative step: lock the grant, verify the proof inside the
-	// --- transaction, and consume it exactly once.
+	// Lock the grant, verify the proof inside the transaction, and consume it
+	// once.
 	claim, err := s.store.ClaimGrant(ctx, p.GrantID, nowSec, p.AgentID, keyFP,
 		func(secret []byte) (bool, error) { return p.VerifyProof(secret, req.Proof) })
 	if err != nil {
@@ -142,8 +135,7 @@ func (s *Signer) Redeem(ctx context.Context, req protocol.RedemptionRequest) (pr
 	validFrom := now.Add(-sshcert.ClockSkewBackdate)
 	validTo := time.Unix(claim.ExpiresAt, 0)
 
-	// The principal comes from the local enrollment record. The redeemer has no
-	// way to influence which account the certificate is good for.
+	// The principal comes from the local grant record, not from the request.
 	cert, err := sshcert.Issue(s.ca, sshcert.Request{
 		PublicKey: sshKey,
 		Principal: claim.SSHUser,

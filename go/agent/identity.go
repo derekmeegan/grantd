@@ -1,14 +1,7 @@
-// Package agent is the reference implementation of the visiting side: the party
-// that receives a capability URL and turns it into an SSH certificate.
-//
-// It ships as a library, not a binary. The protocol is deliberately usable with
-// curl, openssl and ssh-keygen alone — install/redeem.sh does exactly that, and
-// reproduces these same canonical bytes — so a grantd-specific client is a
-// convenience for the test suite rather than something a user needs to install.
-//
-// The agent's SSH private key is generated here and never leaves this process.
-// The coordination service sees only the public half, and even that it cannot
-// substitute, because the public half is covered by the grant MAC.
+// Package agent is the reference implementation of the visiting side, the
+// party that turns a capability URL into an SSH certificate. It is a library
+// for the test suite. install/redeem.sh does the same job with curl, openssl,
+// and ssh-keygen.
 package agent
 
 import (
@@ -25,9 +18,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Identity is the agent's long-lived protocol identity. It is not a credential
-// for any host: it exists so that redemptions can be attributed and rate
-// limited, not so that they can be authorized.
+// Identity is the agent's long-lived protocol identity. It attributes and
+// rate-limits redemptions. It does not authorize them.
 type Identity struct {
 	Key ed25519.PrivateKey
 	ID  string
@@ -86,11 +78,8 @@ type Capability struct {
 	Secret  []byte
 }
 
-// ParseCapabilityURL splits a capability URL into its parts.
-//
-// The secret lives in the fragment precisely so that it is never sent to the
-// coordination service; parsing it here, on the agent's own machine, is the
-// only place it is ever read from the URL.
+// ParseCapabilityURL splits a capability URL into its parts. The secret is
+// read from the fragment here and nowhere else.
 func ParseCapabilityURL(raw string) (Capability, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -123,11 +112,11 @@ func ParseCapabilityURL(raw string) (Capability, error) {
 
 // ------------------------------------------------------------------- SSH keys
 
-// EphemeralSSHKey is a throwaway SSH keypair created for exactly one visit.
+// EphemeralSSHKey is a throwaway SSH keypair for one visit.
 type EphemeralSSHKey struct {
 	Private   ed25519.PrivateKey
 	PublicSSH ssh.PublicKey
-	// Line is the exact authorized_keys text that the redemption MAC covers.
+	// Line is the exact authorized_keys text the redemption MAC covers.
 	Line string
 }
 
@@ -145,13 +134,15 @@ func NewEphemeralSSHKey() (*EphemeralSSHKey, error) {
 	return &EphemeralSSHKey{Private: priv, PublicSSH: sshPub, Line: line}, nil
 }
 
-// WriteOpenSSH writes the private key in OpenSSH format alongside its public
-// key, with the permissions ssh(1) insists on.
+// WriteOpenSSH writes the private key in OpenSSH format next to its public
+// key, with the mode ssh(1) requires.
 func (k *EphemeralSSHKey) WriteOpenSSH(path string) error {
 	block, err := ssh.MarshalPrivateKey(k.Private, "grantd ephemeral")
 	if err != nil {
 		return err
 	}
+	// Remove first. WriteFile keeps the mode of an existing file.
+	_ = os.Remove(path)
 	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
 		return err
 	}

@@ -1,10 +1,10 @@
 // Package signer is the trust root. It is the only process that can read the
-// host identity key and the SSH CA key, and it is the only place where a
-// decision to grant access is ever made.
+// host identity key and the SSH CA key, and the only place that decides to
+// grant access.
 //
-// It has no network access. Everything it accepts arrives over a Unix socket,
-// and it treats every one of those inputs as hostile — including inputs that
-// came from the host's own daemon, which is assumed compromisable.
+// It has no network access. Every input arrives over a Unix socket, and the
+// signer treats every input as hostile, including input from the host's own
+// daemon.
 package signer
 
 import (
@@ -12,6 +12,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/derekmeegan/grantd/go/internal/idkey"
@@ -19,14 +20,11 @@ import (
 	"github.com/derekmeegan/grantd/go/signer/store"
 )
 
-// MaxActiveGrants caps how many grants can be outstanding at once, so that a
-// bug or a compromised owner-side script cannot paper the machine in
-// capabilities.
+// MaxActiveGrants caps how many grants can be outstanding at once.
 const MaxActiveGrants = 32
 
 // NonceRetention is how long redemption nonces are remembered. It must exceed
-// the redemption skew window so that a replay inside the window is always
-// caught.
+// the redemption skew window.
 const NonceRetention = 4 * protocol.SkewRedemption
 
 // Config locates the signer's key material and state.
@@ -34,7 +32,7 @@ type Config struct {
 	HostIdentityKeyPath string
 	SSHCAKeyPath        string
 	StatePath           string
-	Origin              string // coordination service origin, for capability URLs
+	Origin              string // public origin used in capability URLs
 }
 
 // Signer holds the private keys and the authoritative state.
@@ -46,8 +44,7 @@ type Signer struct {
 	now      func() time.Time
 }
 
-// Open loads existing key material and state. It fails if the machine has not
-// been enrolled.
+// Open loads existing key material and state.
 func Open(cfg Config) (*Signer, error) {
 	identity, err := idkey.LoadPrivate(cfg.HostIdentityKeyPath)
 	if err != nil {
@@ -89,8 +86,7 @@ func (s *Signer) SSHCAPublicKeyLine() (string, error) {
 
 // ------------------------------------------------------------------ enrollment
 
-// Enroll writes the local enrollment record. It rejects root and any username
-// or address that would not survive the protocol's own validation.
+// Enroll writes the local enrollment record. It rejects root.
 func (s *Signer) Enroll(ctx context.Context, sshUser, hostname string, port uint64) error {
 	if err := protocol.ValidateSSHUser(sshUser); err != nil {
 		return err
@@ -151,8 +147,8 @@ func (s *Signer) HostRegistration(ctx context.Context) (protocol.HostRegisterReq
 	}, nil
 }
 
-// ConnectAuth produces the headers that authenticate a rendezvous WebSocket
-// upgrade. The daemon asks for these; it never sees the key.
+// ConnectAuth is the set of headers that authenticate a rendezvous WebSocket
+// upgrade. The daemon asks for these and never sees the key.
 type ConnectAuth struct {
 	HostID    string `json:"host_id"`
 	Path      string `json:"path"`
@@ -190,9 +186,8 @@ func (s *Signer) SignConnect(ctx context.Context, path string) (ConnectAuth, err
 
 // ---------------------------------------------------------------- grant issue
 
-// NewGrant is everything the owner needs after creating a grant. The secret and
-// the capability URL are returned exactly once, to the local owner, over the
-// owner socket.
+// NewGrant is what the owner receives after creating a grant. The secret and
+// the capability URL are returned once, over the owner socket.
 type NewGrant struct {
 	GrantID       string                       `json:"grant_id"`
 	ExpiresAt     int64                        `json:"expires_at"`
@@ -200,12 +195,19 @@ type NewGrant struct {
 	Publish       protocol.GrantPublishRequest `json:"publish"`
 }
 
-// ErrTooManyGrants is returned when the active-grant cap is hit.
-var ErrTooManyGrants = errors.New("signer: too many active grants")
+var (
+	// ErrTooManyGrants is returned when the active-grant cap is hit.
+	ErrTooManyGrants = errors.New("signer: too many active grants")
+	// ErrNoOrigin is returned when no public origin is configured.
+	ErrNoOrigin = errors.New("signer: no public origin configured; set --origin at init")
+)
 
 // CreateGrant mints a capability: a random secret kept here, and signed public
 // metadata that carries no trace of it.
 func (s *Signer) CreateGrant(ctx context.Context, ttlSeconds int64) (NewGrant, error) {
+	if !validOrigin(s.cfg.Origin) {
+		return NewGrant{}, ErrNoOrigin
+	}
 	if ttlSeconds == 0 {
 		ttlSeconds = protocol.DefaultGrantTTL
 	}
@@ -262,9 +264,12 @@ func (s *Signer) CreateGrant(ctx context.Context, ttlSeconds int64) (NewGrant, e
 	}, nil
 }
 
+func validOrigin(origin string) bool {
+	return strings.HasPrefix(origin, "https://") || strings.HasPrefix(origin, "http://")
+}
+
 // PendingPublications returns signed public metadata for every grant the
-// daemon still needs to publish. The signature is produced here; the daemon
-// only relays it.
+// daemon still needs to publish.
 func (s *Signer) PendingPublications(ctx context.Context) ([]protocol.GrantPublishRequest, error) {
 	h, err := s.store.Host(ctx)
 	if err != nil {
@@ -307,5 +312,8 @@ func (s *Signer) RevokeGrant(ctx context.Context, id string) error {
 
 // MarkPublished records a successful publish of grant metadata.
 func (s *Signer) MarkPublished(ctx context.Context, id string) error {
+	if !protocol.ValidGrantID(id) {
+		return fmt.Errorf("signer: malformed grant id")
+	}
 	return s.store.MarkPublished(ctx, id, s.now().Unix())
 }

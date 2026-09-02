@@ -1,9 +1,6 @@
 // Package idkey handles on-disk Ed25519 key material for the signer process.
-//
-// Every function here refuses to touch a key file whose permissions would let
-// another account read it. That check is not decoration: the security argument
-// for the whole product is that the network-facing daemon cannot read these
-// bytes, and file mode is what enforces it.
+// It refuses a key file that another account can read. File mode is what
+// keeps the daemon away from these bytes.
 package idkey
 
 import (
@@ -30,7 +27,7 @@ func Generate() (ed25519.PublicKey, ed25519.PrivateKey, error) {
 	return ed25519.GenerateKey(rand.Reader)
 }
 
-// SavePrivate writes a private key with 0600 permissions, refusing to clobber
+// SavePrivate writes a private key with mode 0600. It refuses to overwrite
 // an existing file.
 func SavePrivate(path string, key ed25519.PrivateKey) error {
 	if len(key) != ed25519.PrivateKeySize {
@@ -56,7 +53,8 @@ func SavePrivate(path string, key ed25519.PrivateKey) error {
 	return f.Sync()
 }
 
-// LoadPrivate reads a private key, first verifying that its mode is 0600.
+// LoadPrivate reads a private key. It first makes sure that no other account
+// can read the file.
 func LoadPrivate(path string) (ed25519.PrivateKey, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -96,8 +94,8 @@ func SavePublicSSH(path string, pub ed25519.PublicKey, comment string) error {
 	return os.WriteFile(path, []byte(line), 0o644)
 }
 
-// PublicSSHLine renders an Ed25519 public key as a two-field authorized_keys
-// line with no comment, which is the exact form the protocol signs.
+// PublicSSHLine renders a public key as a two-field authorized_keys line with
+// no comment. This is the form the protocol signs.
 func PublicSSHLine(pub ed25519.PublicKey) (string, error) {
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {

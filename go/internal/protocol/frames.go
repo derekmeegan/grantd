@@ -5,11 +5,9 @@ import (
 	"fmt"
 )
 
-// Rendezvous frame types (protocol/v1.md §10). This list is exhaustive and
-// deliberately tiny. There is no generic RPC frame, and there will never be a
-// frame that carries a command, a path, a filename, or a shell string: the
-// coordination service must not be able to ask a customer machine to do
-// anything except answer a redemption it can already verify locally.
+// Rendezvous frame types (protocol/v1.md section 10). The list is complete.
+// There is no generic RPC frame and no frame that carries a command, a path,
+// or a filename.
 const (
 	FrameHello          = "hello"
 	FrameRedeemRequest  = "redeem.request"
@@ -21,18 +19,9 @@ const (
 // Frame is the envelope for every rendezvous message.
 //
 // Payloads travel in BodyB64 as base64url of the exact bytes, never as nested
-// JSON. That is not a serialization preference, it is the property the design
-// depends on:
-//
-//   - The request body is what the signer verifies. If the coordination service
-//     parsed and re-serialized it, the signer would be verifying bytes the
-//     service produced rather than bytes the agent signed.
-//   - The response body is the host's answer, and JSON round-tripping through a
-//     language with only float64 numbers silently corrupts any 64-bit value in
-//     it — a certificate serial, for instance.
-//
-// Opaque bytes make both problems structurally impossible instead of merely
-// unlikely.
+// JSON. The signer must verify the bytes the agent signed, not bytes the
+// service re-serialized. A JSON round trip through float64 would also corrupt
+// 64-bit values in the response.
 type Frame struct {
 	Type            string `json:"t"`
 	ID              string `json:"id,omitempty"`
@@ -66,7 +55,6 @@ func (f *Frame) BodyJSON() (json.RawMessage, error) {
 }
 
 // KnownFrame reports whether t is a frame type this protocol version defines.
-// Unknown frames are dropped and counted, never interpreted.
 func KnownFrame(t string) bool {
 	switch t {
 	case FrameHello, FrameRedeemRequest, FrameRedeemResponse, FramePing, FramePong:

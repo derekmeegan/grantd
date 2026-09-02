@@ -1,9 +1,6 @@
 // Command grant-signer is the trust root. It holds the host identity key and
-// the SSH CA key, owns the authoritative grant database, and is the only
-// process that can issue a certificate.
-//
-// It never opens a network socket. Every input arrives over one of two Unix
-// sockets, and every input is treated as hostile.
+// the SSH CA key, owns the grant database, and is the only process that can
+// issue a certificate. It never opens a network socket.
 package main
 
 import (
@@ -90,11 +87,9 @@ func (p *paths) bind(fs *flag.FlagSet) {
 	fs.StringVar(&p.state, "state", envOr("GRANTD_STATE", defaultStatePath), "path to the signer state database")
 	fs.StringVar(&p.ownerSock, "owner-sock", envOr("GRANTD_OWNER_SOCK", defaultOwnerSock), "owner Unix socket path")
 	fs.StringVar(&p.daemonSock, "daemon-sock", envOr("GRANTD_DAEMON_SOCK", defaultDaemonSock), "daemon Unix socket path")
-	// GRANTD_PUBLIC_ORIGIN, not GRANTD_ORIGIN. The signer's origin is what a
-	// capability URL says — where the *recipient* will go. The daemon's origin
-	// is where this machine dials out. They are the same string in production
-	// and different behind NAT or in a container, and sharing one variable name
-	// would silently mint links only this machine can follow.
+	// The signer's origin is the public address that goes into capability
+	// URLs. The daemon's origin (GRANTD_ORIGIN) is where this machine dials
+	// out. Behind NAT or in a container the two differ.
 	fs.StringVar(&p.origin, "origin", envOr("GRANTD_PUBLIC_ORIGIN", ""),
 		"public origin to embed in capability URLs, e.g. https://grantd.example.workers.dev")
 }
@@ -120,9 +115,8 @@ func envOr(k, def string) string {
 	return def
 }
 
-// resolveOrigin lets the origin be pinned on disk at init time so that later
-// invocations do not have to be told again, and so that a capability URL never
-// depends on an environment variable the caller controls.
+// resolveOrigin reads the origin pinned on disk at init time, so that later
+// runs do not depend on an environment variable.
 func (p *paths) resolveOrigin() {
 	if p.origin != "" {
 		return
@@ -165,9 +159,7 @@ func cmdInit(args []string, log *slog.Logger) error {
 		return err
 	}
 
-	// Two independent keys. Reusing one key across the application signature
-	// protocol and the SSH certificate protocol would mean a flaw in either
-	// one compromises both.
+	// Two separate keys, so that a flaw in one protocol cannot reach the other.
 	if err := generateIfMissing(p.identityKey(), "", log, "host identity"); err != nil {
 		return err
 	}
@@ -269,8 +261,8 @@ func cmdServe(args []string, log *slog.Logger) error {
 	}
 	defer daemonLn.Close()
 
-	ownerSrv := &http.Server{Handler: srv.OwnerHandler(), ReadHeaderTimeout: 5 * time.Second}
-	daemonSrv := &http.Server{Handler: srv.DaemonHandler(), ReadHeaderTimeout: 5 * time.Second}
+	ownerSrv := socketServer(srv.OwnerHandler())
+	daemonSrv := socketServer(srv.DaemonHandler())
 
 	go func() {
 		if err := ownerSrv.Serve(ownerLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -301,13 +293,25 @@ func cmdServe(args []string, log *slog.Logger) error {
 			log.Info("signer stopped")
 			return nil
 		case <-ticker.C:
-			// Expired grants are useless and their secrets should not linger.
+			// Delete expired grants so that their secrets do not linger.
 			if n, err := s.Store().PurgeExpired(context.Background(), time.Now().Unix(), 24*3600); err != nil {
 				log.Error("purge failed", "err", err)
 			} else if n > 0 {
 				log.Info("purged expired grants", "count", n)
 			}
 		}
+	}
+}
+
+// socketServer builds an HTTP server with timeouts, so that a stuck local
+// client cannot hold a connection open forever.
+func socketServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
@@ -386,9 +390,8 @@ func cmdDestroy(args []string, log *slog.Logger) error {
 	if !*yes {
 		return errors.New("destroy requires --yes; this permanently removes the SSH CA and host identity keys")
 	}
-	// Overwrite before unlinking. On a journaling filesystem this is not a
-	// guarantee, but leaving the bytes readable in freed blocks is strictly
-	// worse than not trying.
+	// Overwrite before unlinking. A journaling filesystem gives no guarantee,
+	// but it is better than leaving the bytes in freed blocks.
 	for _, path := range []string{p.identityKey(), p.caKey(), p.state, p.state + "-wal", p.state + "-shm"} {
 		if err := shred(path); err != nil && !os.IsNotExist(err) {
 			log.Warn("could not remove", "path", path, "err", err)

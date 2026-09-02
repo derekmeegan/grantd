@@ -1,9 +1,6 @@
 // Package protocol implements the grantd v1 wire protocol: identifiers,
-// domain-separated canonical messages, and the JSON envelopes that carry them.
-//
-// Everything in this package is defined byte-for-byte by protocol/v1.md. The
-// shared fixtures in protocol/test-vectors/ are the normative cross-language
-// conformance suite.
+// canonical messages, and the JSON envelopes that carry them. protocol/v1.md
+// defines every byte, and protocol/test-vectors/ is the conformance suite.
 package protocol
 
 import (
@@ -58,8 +55,8 @@ var (
 	ErrBadNonce     = errors.New("protocol: nonce must be 16 bytes")
 )
 
-// idMaterial is SHA-256 over the raw 32-byte public key, truncated to the 20
-// bytes that base32-encode to exactly 32 characters.
+// idMaterial is the first 20 bytes of SHA-256 over the raw public key. Those
+// 20 bytes encode to exactly 32 base32 characters.
 func idMaterial(pub ed25519.PublicKey) ([]byte, error) {
 	if len(pub) != ed25519.PublicKeySize {
 		return nil, ErrBadPublicKey
@@ -88,8 +85,8 @@ func AgentID(pub ed25519.PublicKey) (string, error) {
 	return "a_" + b32.EncodeToString(m), nil
 }
 
-// CheckHostID verifies that a claimed host_id really is the ID of pub. Callers
-// must do this before trusting any other field of a message.
+// CheckHostID makes sure that a claimed host_id is the ID of pub. Callers
+// must do this before they trust any other field of a message.
 func CheckHostID(id string, pub ed25519.PublicKey) error {
 	want, err := HostID(pub)
 	if err != nil {
@@ -101,7 +98,7 @@ func CheckHostID(id string, pub ed25519.PublicKey) error {
 	return nil
 }
 
-// CheckAgentID verifies that a claimed agent_id really is the ID of pub.
+// CheckAgentID makes sure that a claimed agent_id is the ID of pub.
 func CheckAgentID(id string, pub ed25519.PublicKey) error {
 	want, err := AgentID(pub)
 	if err != nil {
@@ -164,8 +161,8 @@ func DecodeSecret(s string) ([]byte, error) {
 	return raw, nil
 }
 
-// CapabilityURL builds the out-of-band capability URL. The secret is placed in
-// the fragment so that it is never transmitted to the coordination service.
+// CapabilityURL builds the capability URL. The secret goes in the fragment,
+// which HTTP clients do not send to the server.
 func CapabilityURL(origin, hostID, grantID string, secret []byte) string {
 	return fmt.Sprintf("%s/g/%s/%s#%s", origin, hostID, grantID, EncodeSecret(secret))
 }

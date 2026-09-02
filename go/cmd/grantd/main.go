@@ -1,9 +1,6 @@
-// Command grantd is the network-facing half of a grantd host.
-//
-// It maintains an outbound connection to the coordination service, publishes
-// signed grant metadata, and relays redemption envelopes to the signer. It runs
-// as an unprivileged user with no access to any key material, and the security
-// model assumes this is the process an attacker gets.
+// Command grantd is the network-facing half of a grantd host. It keeps a
+// connection to the coordination service, publishes signed grant metadata,
+// and relays redemption envelopes to the signer. It has no key material.
 package main
 
 import (
@@ -21,8 +18,8 @@ import (
 
 const (
 	defaultDaemonSock = "/run/grantd/redeem/redeem.sock"
-	// Public config, deliberately outside /etc/grantd: the daemon's systemd unit
-	// makes that directory invisible to it, because it holds both private keys.
+	// The daemon's systemd unit hides /etc/grantd, which holds the private
+	// keys. Its public configuration lives outside that directory.
 	defaultConfigFile = "/etc/grantd.conf"
 )
 

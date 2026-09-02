@@ -34,12 +34,9 @@ func (s *Server) OwnerHandler() http.Handler {
 	return withRecover(mux, s.Log)
 }
 
-// DaemonHandler serves the daemon socket.
-//
-// Note what is not here: no endpoint creates a grant, no endpoint signs
-// arbitrary bytes, and no endpoint takes a path, a command, or a filename. The
-// daemon can ask for exactly three things, each of which the signer constructs
-// itself from local state.
+// DaemonHandler serves the daemon socket. No route here creates a grant,
+// signs arbitrary bytes, or takes a path, a command, or a filename. The
+// signer builds every answer from its own state.
 func (s *Server) DaemonHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /redeem", s.redeem)
@@ -119,8 +116,7 @@ func (s *Server) createGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, protocol.ErrCodeBadRequest, err.Error())
 		return
 	}
-	// The capability URL, including its secret fragment, is returned here and
-	// nowhere else. It is never logged and never leaves this socket.
+	// The capability URL with its secret is returned here and nowhere else.
 	writeJSON(w, http.StatusCreated, g)
 }
 
@@ -250,9 +246,7 @@ func (s *Server) pendingPublications(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, protocol.ErrCodeInternal, err.Error())
 		return
 	}
-	// Public metadata only. Nothing here reveals a grant secret, so a
-	// compromised daemon reading this list learns which grants exist and when
-	// they expire, and nothing that would let it redeem one.
+	// Public metadata only. Nothing here reveals a grant secret.
 	writeJSON(w, http.StatusOK, map[string]any{"publications": pubs})
 }
 
@@ -265,9 +259,8 @@ func (s *Server) connectAuth(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	// The daemon supplies only the request path it is about to use, and the
-	// signature is bound to that path. It cannot ask for a signature over
-	// arbitrary bytes.
+	// The signature is bound to one rendezvous path. The daemon cannot ask
+	// for a signature over arbitrary bytes.
 	if req.Path == "" || !strings.HasPrefix(req.Path, "/v1/hosts/") || len(req.Path) > 256 {
 		writeErr(w, protocol.ErrCodeBadRequest, "path must be a /v1/hosts/... rendezvous path")
 		return

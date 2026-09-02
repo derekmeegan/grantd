@@ -1,6 +1,5 @@
-// Package sshcert issues the short-lived OpenSSH user certificates that are the
-// entire output of the system. Nothing here talks to the network; it runs only
-// inside the signer process, which is the only process that can read the CA key.
+// Package sshcert issues short-lived OpenSSH user certificates. It runs only
+// inside the signer process.
 package sshcert
 
 import (
@@ -14,14 +13,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// ClockSkewBackdate is how far before "now" a certificate becomes valid, so
-// that a host clock slightly ahead of the agent's does not produce a cert that
-// is not yet valid at the moment it is used.
+// ClockSkewBackdate is how far before now a certificate becomes valid. It
+// covers a host clock that runs ahead of the agent's clock.
 const ClockSkewBackdate = 30 * time.Second
 
-// Request describes the certificate to issue. Note what is absent: the caller
-// cannot choose the principal. It is supplied by the signer from its own
-// enrollment record, never from the redemption request.
+// Request describes the certificate to issue. The signer supplies the
+// principal from its own records, never from the redemption request.
 type Request struct {
 	PublicKey ssh.PublicKey // the visiting agent's ephemeral key
 	Principal string        // the enrolled ssh_user
@@ -45,18 +42,14 @@ func NewSerial() (uint64, error) {
 	}
 }
 
-// KeyID is the certificate's human-readable audit label. It ties a live SSH
-// session in the sshd log back to the exact grant and agent that produced it.
+// KeyID is the certificate's audit label. It ties an sshd log line to the
+// grant and agent that produced the session.
 func KeyID(grantID, agentID string) string {
 	return fmt.Sprintf("grantd:%s:%s", grantID, agentID)
 }
 
-// Issue signs a user certificate with the host's SSH CA.
-//
-// The extension set is deliberately minimal: an interactive shell, and nothing
-// that turns the visiting agent's session into a network tunnel. V1 makes no
-// claim to restrict what commands run inside that shell, but it does not have
-// to hand out port forwarding to deliver a shell.
+// Issue signs a user certificate with the host's SSH CA. The extensions allow
+// an interactive shell and nothing that turns the session into a tunnel.
 func Issue(ca ed25519.PrivateKey, req Request) (*ssh.Certificate, error) {
 	if req.PublicKey == nil {
 		return nil, fmt.Errorf("sshcert: missing public key")

@@ -1,9 +1,6 @@
-// Package signerclient is the daemon's only way to reach the signer.
-//
-// The surface is intentionally tiny. There is no method here that creates a
-// grant, signs arbitrary bytes, reads a file, or runs a command, because those
-// endpoints do not exist on the daemon socket. A compromised daemon gets
-// exactly this list and nothing more.
+// Package signerclient is the daemon's only way to reach the signer. No
+// method here creates a grant, signs arbitrary bytes, reads a file, or runs a
+// command. Those routes do not exist on the daemon socket.
 package signerclient
 
 import (
@@ -128,14 +125,9 @@ func (c *Client) MarkPublished(ctx context.Context, grantID string) error {
 	return nil
 }
 
-// Redeem forwards a redemption envelope, unchanged, to the signer and returns
-// the signer's verdict.
-//
-// The envelope is passed through as raw bytes rather than re-marshalled. The
-// daemon must not be able to reshape what the signer verifies, even by
-// accident: a re-serialization that reordered or renormalized a field would put
-// the daemon in a position to influence a decision that is supposed to be made
-// entirely without trusting it.
+// Redeem forwards a redemption envelope to the signer as raw bytes and
+// returns the signer's verdict. The daemon must not reshape what the signer
+// verifies, so the bytes are never re-marshalled.
 func (c *Client) Redeem(ctx context.Context, envelope json.RawMessage) (int, json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://signer/redeem",
 		bytes.NewReader(envelope))

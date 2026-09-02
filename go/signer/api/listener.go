@@ -1,10 +1,6 @@
-// Package api exposes the signer over two deliberately narrow Unix sockets.
-//
-// The split is the local privilege boundary. The owner socket can mint
-// capabilities; the daemon socket cannot. A remote code execution bug in the
-// network-facing daemon therefore does not hand the attacker an API that
-// creates grants — the worst it can do is replay envelopes the signer would
-// have rejected anyway.
+// Package api exposes the signer over two narrow Unix sockets. The owner
+// socket can mint capabilities. The daemon socket cannot. This split is the
+// local privilege boundary.
 package api
 
 import (
@@ -15,22 +11,18 @@ import (
 	"syscall"
 )
 
-// Listen creates a Unix socket with an exact mode and owner, replacing any
-// stale socket left behind by an unclean shutdown.
+// Listen creates a Unix socket with an exact mode and owner. It replaces a
+// stale socket left by an unclean shutdown.
 //
-// The socket is created under a temporary name, given its mode and ownership,
-// and only then renamed into place. There is therefore no window in which a
-// listening socket exists with permissions wider than intended — which matters,
-// because file permissions are the mechanism that keeps the daemon off the
-// owner socket.
-//
-// uid and gid of -1 leave the current ownership alone.
+// The socket is created under a temporary name, given its mode and owner,
+// and then renamed into place. A listening socket with wide permissions never
+// exists, not even briefly. A uid or gid of -1 keeps the current owner.
 func Listen(path string, mode os.FileMode, uid, gid int) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	// A leftover socket file is not a lock: if nothing is listening, it is
-	// stale and must be removed, otherwise bind fails forever after a crash.
+	// If nothing listens on a leftover socket file, remove it. Otherwise bind
+	// fails after every crash.
 	if _, err := os.Stat(path); err == nil {
 		if c, derr := net.Dial("unix", path); derr == nil {
 			c.Close()
@@ -63,25 +55,19 @@ func Listen(path string, mode os.FileMode, uid, gid int) (net.Listener, error) {
 		return nil, err
 	}
 	if ul, ok := ln.(*net.UnixListener); ok {
-		// We renamed the socket; Go would otherwise unlink the old name.
+		// The socket was renamed. Stop Go from unlinking the old name.
 		ul.SetUnlinkOnClose(false)
 	}
 	return &namedListener{Listener: ln, path: path}, nil
 }
 
-// ensureOwnership makes sure the socket has the requested uid/gid, preferring
-// to verify rather than to change.
+// ensureOwnership makes sure that the socket has the requested uid and gid.
+// It checks first and calls chown only when the owner is wrong.
 //
-// The ordering matters more than it looks. The supported deployment puts each
-// socket in a setgid directory, so the kernel already assigns the right group at
-// creation and no chown is needed. Checking first means the common path never
-// calls chown at all — which lets the signer's systemd unit deny @privileged
-// outright.
-//
-// That is not a cosmetic difference. A denied syscall under seccomp raises
-// SIGSYS and kills the process; it does not return EPERM. So a "try chown, fall
-// back on failure" design does not degrade gracefully under a syscall filter,
-// it dies. Checking first avoids the syscall instead of handling its failure.
+// The order matters. In the supported deployment each socket lives in a
+// setgid directory, so the kernel assigns the right group and no chown is
+// needed. The signer's systemd unit denies @privileged, and a denied syscall
+// under seccomp kills the process with SIGSYS instead of returning EPERM.
 func ensureOwnership(path string, uid, gid int) error {
 	if uid < 0 && gid < 0 {
 		return nil
@@ -96,10 +82,9 @@ func ensureOwnership(path string, uid, gid int) error {
 		return nil
 	}
 
-	// Ownership is wrong, so the deployment is not the supported one. Try to
-	// correct it; if the syscall is unavailable this process is about to die,
-	// which is the right outcome — serving a socket with the wrong owner would
-	// silently remove the boundary between the daemon and the owner API.
+	// The owner is wrong, so this is not the supported deployment. Try to
+	// fix it. If seccomp kills the process here, that is the right outcome.
+	// A socket with the wrong owner would remove the privilege boundary.
 	if err := os.Chown(path, uid, gid); err != nil {
 		return fmt.Errorf("api: %s has owner %d:%d, want %d:%d, and chown failed "+
 			"(is its directory setgid to that group?): %w", path, st.Uid, st.Gid, uid, gid, err)
@@ -118,12 +103,9 @@ func (l *namedListener) Close() error {
 	return err
 }
 
-// PeerFilter wraps a listener so that connections from unexpected UIDs are
-// closed immediately.
-//
-// Socket file permissions already enforce this. The peer-credential check is a
-// second, independent mechanism, so that a misconfigured mode or an
-// umask surprise during installation does not silently widen access.
+// PeerFilter closes connections from unexpected UIDs at once. Socket file
+// permissions already enforce this. The peer-credential check is a second,
+// independent mechanism.
 type PeerFilter struct {
 	net.Listener
 	AllowedUIDs []uint32
@@ -138,7 +120,7 @@ func (p *PeerFilter) Accept() (net.Conn, error) {
 		}
 		uid, err := peerUID(c)
 		if err != nil {
-			// Platforms without peer credentials fall back to file permissions.
+			// A platform without peer credentials relies on file permissions.
 			if err == errPeerCredUnsupported {
 				return c, nil
 			}

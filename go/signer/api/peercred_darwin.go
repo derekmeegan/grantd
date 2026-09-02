@@ -11,8 +11,7 @@ import (
 
 var errPeerCredUnsupported = errors.New("api: peer credentials unsupported")
 
-// peerUID reads LOCAL_PEERCRED. Only used when developing on macOS; production
-// hosts are Linux.
+// peerUID reads LOCAL_PEERCRED. This path serves development on macOS only.
 func peerUID(c net.Conn) (uint32, error) {
 	uc, ok := c.(*net.UnixConn)
 	if !ok {

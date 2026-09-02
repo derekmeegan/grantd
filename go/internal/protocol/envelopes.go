@@ -5,8 +5,7 @@ import (
 	"fmt"
 )
 
-// Wire size limits. Enforced by every party that parses an envelope so that a
-// hostile peer cannot make anyone allocate without bound.
+// Wire size limits. Every party that parses an envelope enforces them.
 const (
 	MaxRequestBytes   = 16 * 1024
 	MaxSSHPubKeyBytes = 1024
@@ -72,8 +71,8 @@ func (r *GrantPublishRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// RedemptionRequest is the body of POST /v1/hosts/:h/grants/:g/redeem and is
-// also the exact envelope forwarded, unchanged, all the way to the signer.
+// RedemptionRequest is the body of POST /v1/hosts/:h/grants/:g/redeem. The
+// same bytes are forwarded unchanged to the signer.
 type RedemptionRequest struct {
 	Payload        RedemptionPayload `json:"-"`
 	AgentSignature []byte            `json:"-"`
@@ -107,15 +106,43 @@ func (r *RedemptionRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// RedemptionResponse is what a successful redeemer receives. Everything in it
-// is public: it is enough to open an SSH connection and nothing more.
-//
-// Serial is carried as a decimal string. It is a random uint64, and a JSON
-// number that large does not survive a parser backed by float64 — which is most
-// of them, including every browser and the Worker itself. It is an identifier,
-// not an arithmetic quantity, so a string costs nothing and removes a class of
-// "the serial in the audit log does not match the serial in the certificate"
-// bugs entirely.
+// HostPublicRecord is the body of GET /v1/hosts/:host_id. The service adds
+// its own fields, and a verifier ignores them. Registration and Signature are
+// the exact envelope the host last sent in PUT /v1/hosts/:host_id.
+type HostPublicRecord struct {
+	HostID       string           `json:"-"`
+	Registration HostRegistration `json:"-"`
+	Signature    []byte           `json:"-"`
+	Connected    bool             `json:"-"`
+}
+
+type hostPublicRecordJSON struct {
+	HostID       string           `json:"host_id"`
+	Registration HostRegistration `json:"registration"`
+	Signature    string           `json:"signature"`
+	Connected    bool             `json:"connected"`
+}
+
+func (r HostPublicRecord) MarshalJSON() ([]byte, error) {
+	return json.Marshal(hostPublicRecordJSON{r.HostID, r.Registration, b64enc(r.Signature), r.Connected})
+}
+
+func (r *HostPublicRecord) UnmarshalJSON(data []byte) error {
+	var j hostPublicRecordJSON
+	if err := json.Unmarshal(data, &j); err != nil {
+		return err
+	}
+	sig, err := b64dec("signature", j.Signature)
+	if err != nil {
+		return err
+	}
+	*r = HostPublicRecord{HostID: j.HostID, Registration: j.Registration, Signature: sig, Connected: j.Connected}
+	return nil
+}
+
+// RedemptionResponse is what a successful redeemer receives. Every field is
+// public. Serial is a decimal string because a random uint64 does not survive
+// a float64 JSON parser.
 type RedemptionResponse struct {
 	Hostname       string `json:"hostname"`
 	Port           uint64 `json:"port"`
@@ -169,8 +196,8 @@ type Challenge struct {
 	Pow         PowSpec `json:"pow"`
 }
 
-// APIError is the uniform error envelope. Code is one of the constants in
-// errors.go and is the thing clients should branch on; Message is for humans.
+// APIError is the uniform error envelope. Clients branch on Code. Message is
+// for humans.
 type APIError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`

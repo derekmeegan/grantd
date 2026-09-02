@@ -17,10 +17,8 @@ import (
 
 const testOrigin = "https://grantd.test"
 
-// newSigner builds an enrolled signer on a temporary directory. Everything the
-// tests do goes through the same code path production uses; nothing reaches
-// into the database behind the signer's back except where a test is
-// deliberately simulating a compromised component.
+// newSigner builds an enrolled signer on a temporary directory. The tests use
+// the production code paths, except where one simulates a compromised part.
 func newSigner(t *testing.T) *signer.Signer {
 	t.Helper()
 	dir := t.TempDir()
@@ -67,8 +65,8 @@ func newSSHKey(t *testing.T) *agent.EphemeralSSHKey {
 	return k
 }
 
-// mintCapability creates a grant and parses the capability URL exactly as a
-// recipient agent would.
+// mintCapability creates a grant and parses the capability URL as a recipient
+// does.
 func mintCapability(t *testing.T, s *signer.Signer, ttl int64) agent.Capability {
 	t.Helper()
 	g, err := s.CreateGrant(context.Background(), ttl)
@@ -190,8 +188,7 @@ func TestCapabilityURLKeepsSecretInFragment(t *testing.T) {
 	if !found {
 		t.Fatal("capability url has no fragment")
 	}
-	// Everything the coordination service can see is the part before the '#'.
-	// If any byte of the secret appeared there, the whole design would be moot.
+	// The service sees only the part before the '#'.
 	if strings.Contains(before, "=") || len(strings.Split(before, "/")) != 6 {
 		t.Errorf("unexpected capability url path shape: %q", before)
 	}
@@ -217,8 +214,7 @@ func TestRedeemRejections(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// This is exactly what a malicious coordination service would try: keep
-		// the envelope, swap in a key it controls.
+		// Keep the envelope, swap in a key the attacker controls.
 		attacker := newSSHKey(t)
 		req.Payload.SSHPublicKey = attacker.Line
 		if code := redeemErrCode(t, mustFail(s.Redeem(ctx, req))); code != protocol.ErrCodeBadSignature && code != protocol.ErrCodeBadProof {
@@ -417,14 +413,9 @@ func TestGrantIsSingleUse(t *testing.T) {
 	}
 }
 
-// TestReplayingAWonRedemptionIsRejected pins the deliberate absence of an
-// idempotent-retry path. A grant is consumed exactly once, with no exception for
-// the agent that won it: resubmitting the identical envelope fails.
-//
-// The cost is that a lost response burns the grant. That is a real regression in
-// convenience, accepted knowingly — grants are free to mint, and the alternative
-// was a special case inside the one function where a mistake means two keys get
-// access.
+// TestReplayingAWonRedemptionIsRejected pins the absence of a retry path. A
+// grant is consumed once, even for the agent that won it. A lost response
+// costs one more grant. See protocol/v1.md section 8.
 func TestReplayingAWonRedemptionIsRejected(t *testing.T) {
 	s := newSigner(t)
 	ctx := context.Background()
@@ -462,8 +453,7 @@ func TestReplayWithADifferentKeyIsRejected(t *testing.T) {
 	if _, err := s.Redeem(ctx, req); err != nil {
 		t.Fatal(err)
 	}
-	// Same nonce, different key: a captured envelope reused to certify a key
-	// the original holder never chose.
+	// Same nonce, different key.
 	replay := req
 	other := newSSHKey(t)
 	replay.Payload.SSHPublicKey = other.Line
@@ -473,9 +463,8 @@ func TestReplayWithADifferentKeyIsRejected(t *testing.T) {
 }
 
 // TestConcurrentRedemptionsProduceExactlyOneWinner fires many simultaneous
-// redemptions with distinct SSH keys at a single grant. Single-use has to hold
-// under contention, not just in sequence — this is the property a race in the
-// claim transaction would quietly destroy.
+// redemptions with distinct SSH keys at one grant. Single-use must hold under
+// contention.
 func TestConcurrentRedemptionsProduceExactlyOneWinner(t *testing.T) {
 	s := newSigner(t)
 	ctx := context.Background()

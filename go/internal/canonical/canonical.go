@@ -1,10 +1,7 @@
-// Package canonical implements grantd Canonical Binary Encoding (CBE) as
-// specified in protocol/v1.md §1.
-//
-// CBE exists so that the bytes covered by a signature or MAC are produced by a
-// rule with no degrees of freedom: no key ordering, no duplicate keys, no
-// Unicode escaping, no number formatting, no whitespace. A message is a flat,
-// ordered list of typed, named fields prefixed by a domain separation string.
+// Package canonical implements Canonical Binary Encoding (CBE) as specified
+// in protocol/v1.md section 1. A message is a flat, ordered list of typed,
+// named fields under a domain separation string. There is no key ordering,
+// escaping, or number formatting to get wrong.
 package canonical
 
 import (
@@ -25,9 +22,8 @@ const (
 	TagBool   byte = 0x04
 )
 
-// MaxU64 is the largest U64 the protocol permits. Values above 2^63-1 are
-// rejected so that implementations in languages with signed 64-bit integers
-// cannot silently disagree with implementations that have unsigned ones.
+// MaxU64 is the largest U64 the protocol permits. The limit keeps languages
+// with signed 64-bit integers in agreement with unsigned ones.
 const MaxU64 uint64 = math.MaxInt64
 
 var (
@@ -38,13 +34,12 @@ var (
 	ErrEmptyCtx    = errors.New("canonical: context is empty")
 )
 
-// Field is one named, typed element of a message. Fields are always encoded in
-// the order they appear in the slice, which must match the order declared in
-// protocol/v1.md.
+// Field is one named, typed element of a message. Fields are encoded in slice
+// order, which must match protocol/v1.md.
 type Field struct {
 	Name string
 	Tag  byte
-	// Exactly one of the following carries the value, selected by Tag.
+	// Tag selects which one of these carries the value.
 	Str   string
 	U64   uint64
 	Bytes []byte
@@ -123,8 +118,7 @@ func Encode(context string, fields []Field) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// MustEncode is Encode for inputs that are already known to be valid. It panics
-// on error and is only for tests and vector generation.
+// MustEncode panics on error. Tests and vector generation only.
 func MustEncode(context string, fields []Field) []byte {
 	b, err := Encode(context, fields)
 	if err != nil {

@@ -11,8 +11,7 @@ import (
 	"github.com/derekmeegan/grantd/go/internal/canonical"
 )
 
-// Domain separation strings (protocol/v1.md §1.4). A signature produced under
-// one context can never verify under another.
+// Domain separation strings (protocol/v1.md section 1.4).
 const (
 	CtxHostRegister  = "grantd/v1/host-register"
 	CtxHostConnect   = "grantd/v1/host-connect"
@@ -37,8 +36,7 @@ func u64(v int64) (uint64, error) {
 
 // ---------------------------------------------------------------- host register
 
-// HostRegistration is the self-certifying enrollment record a host publishes.
-// It carries only public information.
+// HostRegistration is the public enrollment record a host publishes.
 type HostRegistration struct {
 	Version           uint64 `json:"version"`
 	HostID            string `json:"host_id"`
@@ -96,9 +94,8 @@ func (m *HostConnect) Canonical() ([]byte, error) {
 
 // ---------------------------------------------------------------------- grant
 
-// Grant is the public grant metadata. It deliberately contains no secret and no
-// derivative of the secret; this is the whole record the coordination service
-// is ever given.
+// Grant is the public grant metadata. It contains no secret and no derivative
+// of the secret. It is the whole record the coordination service receives.
 type Grant struct {
 	Version   uint64 `json:"version"`
 	HostID    string `json:"host_id"`
@@ -129,13 +126,11 @@ func (m *Grant) Canonical() ([]byte, error) {
 
 // ----------------------------------------------------------------- redemption
 
-// RedemptionPayload is the statement a visiting agent makes: "this agent wants
-// this SSH key certified under this grant on this host, now".
+// RedemptionPayload is the visiting agent's request: certify this SSH key
+// under this grant on this host, now.
 //
-// It is covered by two independent proofs. The Ed25519 agent signature binds
-// the statement to a registered identity. The HMAC proof, keyed by the grant
-// secret, is the actual authorization. Only the second one can mint access,
-// and only a party that holds the secret can produce it.
+// Two proofs cover it. The Ed25519 agent signature binds it to a registered
+// identity. The HMAC proof, keyed by the grant secret, is the authorization.
 type RedemptionPayload struct {
 	Version        uint64 `json:"version"`
 	HostID         string `json:"host_id"`
@@ -204,8 +199,8 @@ func (m *RedemptionPayload) VerifyProof(secret, proof []byte) (bool, error) {
 
 // ------------------------------------------------------------- agent register
 
-// AgentRegistration enrolls an agent identity public key after the agent has
-// solved an Agent Captcha challenge.
+// AgentRegistration enrolls an agent identity key after a solved proof of
+// work.
 type AgentRegistration struct {
 	Version     uint64 `json:"version"`
 	AgentID     string `json:"agent_id"`
@@ -232,15 +227,12 @@ func (m *AgentRegistration) Canonical() ([]byte, error) {
 
 // -------------------------------------------------------------------- signing
 
-// Signer is anything that can produce an Ed25519 signature over canonical
-// bytes. The host daemon holds one that talks to the signer process over a Unix
-// socket; it never holds the key itself.
+// Signer produces an Ed25519 signature over canonical bytes.
 type Signer interface {
 	SignCanonical(msg []byte) ([]byte, error)
 }
 
-// KeySigner is the in-process Signer backed by an actual private key. Only the
-// signer process and the visiting agent ever construct one.
+// KeySigner is a Signer backed by a private key held in this process.
 type KeySigner struct{ Key ed25519.PrivateKey }
 
 func (k KeySigner) SignCanonical(msg []byte) ([]byte, error) {
@@ -260,9 +252,9 @@ func Verify(pub ed25519.PublicKey, msg, sig []byte) bool {
 
 // -------------------------------------------------------------- JSON envelopes
 //
-// Binary fields travel as base64url without padding. Each message gets an
-// explicit shadow struct rather than reflection so that the JSON shape is
-// visible in the source and cannot drift from the spec silently.
+// Binary fields travel as base64url without padding. Each message has an
+// explicit JSON shadow struct, so that the wire shape is visible in the
+// source.
 
 func b64enc(b []byte) string { return B64.EncodeToString(b) }
 

@@ -12,11 +12,8 @@ var usernameRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 // hostnameRe accepts DNS names and bare IPv4/IPv6 literals.
 var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9._:\[\]-]{1,253}$`)
 
-// ValidateSSHUser enforces the v1 enrollment rules for the login account.
-//
-// root is rejected outright. grantd hands out certificates for whatever account
-// was enrolled, and the product's whole claim is that the blast radius of a
-// visiting agent is bounded by that account. Enrolling root removes the bound.
+// ValidateSSHUser enforces the v1 rules for the login account. root is
+// rejected because the enrolled account bounds what a visitor can do.
 func ValidateSSHUser(u string) error {
 	if u == "" {
 		return fmt.Errorf("ssh_user is required")

@@ -1,13 +1,6 @@
 // Package adversarial runs the real signer and the real daemon against a
-// coordination service that is trying to break them.
-//
-// This is the test the whole architecture exists to pass. The product's central
-// claim is that compromising the coordination plane — the Worker, the Durable
-// Objects, the deployment credentials, everything — is not enough to obtain SSH
-// access to a customer's machine. A test that only exercises the honest service
-// cannot show that. So the service here is not a mock of the real one: it is an
-// attacker with full control of every byte on the wire, and every one of its
-// attempts must fail on the customer's side.
+// coordination service that tries to break them. The service here is an
+// attacker with control of every byte on the wire. Every attempt must fail.
 package adversarial
 
 import (
@@ -37,10 +30,9 @@ import (
 
 // ---------------------------------------------------------------- the attacker
 
-// hostileService is a coordination service under an attacker's complete
-// control. It accepts any registration without checking a signature, accepts
-// any WebSocket upgrade without verifying who is connecting, and lets the test
-// send arbitrary bytes to the host at will.
+// hostileService is a coordination service under an attacker's control. It
+// accepts any registration and any WebSocket upgrade, and it lets the test
+// send arbitrary bytes to the host.
 type hostileService struct {
 	t   *testing.T
 	srv *httptest.Server
@@ -64,14 +56,13 @@ func newHostileService(t *testing.T) *hostileService {
 	}
 	mux := http.NewServeMux()
 
-	// Registration: accepted blindly. A hostile service has no incentive to
-	// verify the signature it is given.
+	// Registration is accepted without a signature check.
 	mux.HandleFunc("PUT /v1/hosts/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"registered":true}`))
 	})
 
-	// Grant publication: recorded, so the attacker can try to tamper with it.
+	// Grant publications are recorded so that the attacker can tamper with them.
 	mux.HandleFunc("PUT /v1/hosts/{host}/grants/{grant}", func(w http.ResponseWriter, r *http.Request) {
 		var pub protocol.GrantPublishRequest
 		if err := json.NewDecoder(r.Body).Decode(&pub); err == nil {
@@ -124,9 +115,8 @@ func (h *hostileService) readLoop(conn *websocket.Conn) {
 	}
 }
 
-// sendRaw pushes an arbitrary frame at the host and waits up to timeout for an
-// answer. A false second return means the host said nothing, which for an
-// unknown frame type is the correct behaviour.
+// sendRaw pushes a frame at the host and waits up to timeout for an answer.
+// A false second return means the host said nothing.
 func (h *hostileService) sendRaw(t *testing.T, frame protocol.Frame, timeout time.Duration) (protocol.Frame, bool) {
 	t.Helper()
 	if frame.ID == "" {
@@ -203,8 +193,8 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 
-	// Sockets live under /tmp because sun_path is 104 bytes on darwin and the
-	// default temp directory is longer than that.
+	// sun_path is 104 bytes on darwin, and the default temp directory is
+	// longer than that.
 	runDir, err := os.MkdirTemp("/tmp", "gd")
 	if err != nil {
 		t.Fatal(err)
@@ -265,12 +255,10 @@ func newHarness(t *testing.T) *harness {
 	case <-time.After(15 * time.Second):
 		t.Fatal("daemon never connected to the hostile service")
 	}
-	// Give the publish loop a moment so that grants created below get published.
 	return &harness{signer: sg, service: svc, sshUser: "ubuntu"}
 }
 
-// mint creates a real grant and returns the capability exactly as a legitimate
-// recipient would hold it.
+// mint creates a real grant and returns the capability as a recipient holds it.
 func (h *harness) mint(t *testing.T, ttl int64) agent.Capability {
 	t.Helper()
 	g, err := h.signer.CreateGrant(context.Background(), ttl)
@@ -312,15 +300,14 @@ func envelopeFor(t *testing.T, ident *agent.Identity, cap agent.Capability, sshL
 
 // ------------------------------------------------------------------- attacks
 
-// TestHostileServiceCannotMintAccess is the headline: with total control of the
-// coordination plane and of every byte reaching the host, the attacker still
-// gets nothing.
+// TestHostileServiceCannotMintAccess: with control of every byte that reaches
+// the host, the attacker gets no certificate.
 func TestHostileServiceCannotMintAccess(t *testing.T) {
 	h := newHarness(t)
 	svc := h.service
 
 	t.Run("fabricated grant", func(t *testing.T) {
-		// The service invents a grant id and a payload out of thin air.
+		// The service invents a grant id and a payload.
 		ident, key := newVisitor(t)
 		fakeID, err := protocol.NewGrantID()
 		if err != nil {
@@ -340,8 +327,7 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 	t.Run("guessing the secret of a real grant", func(t *testing.T) {
 		cap := h.mint(t, 1800)
 		ident, key := newVisitor(t)
-		// The service knows the grant id, the host id, and the agent's public
-		// key. It does not know the secret, and that is the whole difference.
+		// The service knows everything except the secret.
 		guess := cap
 		guess.Secret = make([]byte, protocol.SecretLen)
 		status, body := svc.redeem(t, envelopeFor(t, ident, guess, key.Line))
@@ -351,8 +337,7 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 		if code := errorCode(t, body); code != protocol.ErrCodeBadProof {
 			t.Errorf("code = %s, want BAD_PROOF", code)
 		}
-		// And the grant must survive the attempt, or guessing becomes a way to
-		// destroy capabilities.
+		// The grant must survive a wrong guess.
 		v, err := h.signer.Store().GetGrantView(context.Background(), cap.GrantID)
 		if err != nil {
 			t.Fatal(err)
@@ -367,8 +352,7 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 		ident, key := newVisitor(t)
 		raw := envelopeFor(t, ident, cap, key.Line)
 
-		// This is the attack the design is built around: intercept a real
-		// redemption and swap in a key the attacker holds.
+		// Intercept a real redemption and swap in the attacker's key.
 		var req protocol.RedemptionRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			t.Fatal(err)
@@ -391,8 +375,8 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 	})
 
 	t.Run("extending the expiry of a real grant", func(t *testing.T) {
-		// The service holds the signed public metadata. It can rewrite its own
-		// copy freely; the host never consults it.
+		// The service can rewrite its own copy of the metadata. The host never
+		// reads it.
 		cap := h.mint(t, 60)
 		svc.mu.Lock()
 		if pub, ok := svc.published[cap.GrantID]; ok {
@@ -427,8 +411,7 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 		if status != 200 {
 			t.Fatalf("the legitimate redemption failed with %d", status)
 		}
-		// Same secret, new agent, new key: the attacker has everything the
-		// first redeemer had.
+		// Same secret, new agent, new key.
 		ident2, key2 := newVisitor(t)
 		status, body := svc.redeem(t, envelopeFor(t, ident2, cap, key2.Line))
 		if status == 200 {
@@ -458,8 +441,7 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 	})
 
 	t.Run("replaying the exact captured envelope", func(t *testing.T) {
-		// There is no idempotent-retry path, so even a byte-identical replay is
-		// refused. The nonce catches it before the grant is consulted.
+		// There is no retry path. The nonce check refuses the exact replay.
 		cap := h.mint(t, 1800)
 		ident, key := newVisitor(t)
 		raw := envelopeFor(t, ident, cap, key.Line)
@@ -523,9 +505,8 @@ func TestHostileServiceCannotMintAccess(t *testing.T) {
 	})
 }
 
-// TestHostileServiceCannotMakeTheHostDoAnythingElse checks the frame vocabulary.
-// A coordination service that can ask a machine to run a command has not reduced
-// the trust placed in it, it has moved it.
+// TestHostileServiceCannotMakeTheHostDoAnythingElse checks that the host
+// ignores every frame type outside the protocol.
 func TestHostileServiceCannotMakeTheHostDoAnythingElse(t *testing.T) {
 	h := newHarness(t)
 	svc := h.service
@@ -551,8 +532,7 @@ func TestHostileServiceCannotMakeTheHostDoAnythingElse(t *testing.T) {
 		t.Fatal("an unknown frame had a side effect on the filesystem")
 	}
 
-	// The connection must still work afterwards: dropping junk is not the same
-	// as falling over.
+	// The connection must still work afterwards.
 	cap := h.mint(t, 1800)
 	ident, key := newVisitor(t)
 	if status, body := svc.redeem(t, envelopeFor(t, ident, cap, key.Line)); status != 200 {
@@ -560,8 +540,8 @@ func TestHostileServiceCannotMakeTheHostDoAnythingElse(t *testing.T) {
 	}
 }
 
-// TestHostileServiceCannotForgeSignedMaterial confirms the service cannot
-// produce anything the host would accept as host-signed, since it has no key.
+// TestHostileServiceCannotForgeSignedMaterial: the service has no host key, so
+// nothing it signs verifies as host-signed.
 func TestHostileServiceCannotForgeSignedMaterial(t *testing.T) {
 	h := newHarness(t)
 
@@ -574,8 +554,7 @@ func TestHostileServiceCannotForgeSignedMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The attacker signs with a key it generated. It verifies under that key
-	// and under no other, which is the entire point.
+	// The attacker signs with its own key. That verifies under no other key.
 	_, attackerKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)

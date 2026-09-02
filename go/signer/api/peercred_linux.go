@@ -11,8 +11,8 @@ import (
 
 var errPeerCredUnsupported = errors.New("api: peer credentials unsupported")
 
-// peerUID reads SO_PEERCRED, which the kernel fills in at connect time and no
-// userspace process can forge.
+// peerUID reads SO_PEERCRED. The kernel sets it at connect time and no
+// userspace process can forge it.
 func peerUID(c net.Conn) (uint32, error) {
 	uc, ok := c.(*net.UnixConn)
 	if !ok {

@@ -1,8 +1,6 @@
 // Package store is the signer's local state: the enrollment record, grant
-// secrets, redemption state, issued certificates, and seen nonces.
-//
-// This database is the authority. The coordination service's copy of any of
-// this is a routing hint. Nothing in here is ever uploaded.
+// secrets, redemption state, issued certificates, and seen nonces. This
+// database is the authority. Nothing in it is uploaded.
 package store
 
 import (
@@ -67,12 +65,17 @@ CREATE TABLE IF NOT EXISTS certificates (
 );
 
 CREATE TABLE IF NOT EXISTS nonces (
-    nonce   BLOB PRIMARY KEY,
     scope   TEXT NOT NULL,
-    seen_at INTEGER NOT NULL
+    nonce   BLOB NOT NULL,
+    seen_at INTEGER NOT NULL,
+    PRIMARY KEY (scope, nonce)
 );
 CREATE INDEX IF NOT EXISTS nonces_seen_at ON nonces (seen_at);
 `
+
+// schemaVersion is stored in PRAGMA user_version. Bump it with every
+// migration in migrate.
+const schemaVersion = 2
 
 // Open creates or opens the signer database, enforcing 0600 on the file.
 func Open(path string) (*Store, error) {
@@ -89,16 +92,78 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: schema: %w", err)
 	}
-	// The DB is created by whatever umask is in force; pin it explicitly.
+	// The umask decides the initial mode. Pin it.
 	if err := os.Chmod(path, DBFileMode); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db, path: path}, nil
+}
+
+// migrate creates the schema on a new database and upgrades an old one. Every
+// step runs in one transaction, so a crash leaves either the old version or
+// the new one.
+func migrate(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == 0 && !hasTable(tx, "nonces") {
+		// A new database gets the current schema directly.
+		if _, err := tx.Exec(schema); err != nil {
+			return err
+		}
+		version = schemaVersion
+	}
+	if version < 2 {
+		// Version 1 keyed nonces by nonce alone, so two scopes could collide.
+		if _, err := tx.Exec(`
+        CREATE TABLE nonces_v2 (
+            scope   TEXT NOT NULL,
+            nonce   BLOB NOT NULL,
+            seen_at INTEGER NOT NULL,
+            PRIMARY KEY (scope, nonce)
+        );
+        INSERT OR IGNORE INTO nonces_v2 (scope, nonce, seen_at)
+            SELECT scope, nonce, seen_at FROM nonces;
+        DROP TABLE nonces;
+        ALTER TABLE nonces_v2 RENAME TO nonces;
+        CREATE INDEX IF NOT EXISTS nonces_seen_at ON nonces (seen_at);`); err != nil {
+			return err
+		}
+		version = 2
+	}
+	// Tables added after version 1 are created here for old databases too.
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func hasTable(tx *sql.Tx, name string) bool {
+	var n int
+	err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n)
+	return err == nil && n > 0
+}
+
+// SchemaVersion reports the database's PRAGMA user_version. Tests only.
+func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
+	var v int
+	err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v)
+	return v, err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -191,13 +256,8 @@ func (s *Store) MarkPublished(ctx context.Context, id string, at int64) error {
 	return err
 }
 
-// PendingPublications returns grants whose public metadata has not yet been
-// accepted by the coordination service and which are still worth publishing.
-//
-// The daemon polls this instead of being pushed to. Polling is the failure
-// tolerant direction: a grant created while the network is down is published as
-// soon as connectivity returns, with no queue to lose and no notification to
-// miss.
+// PendingPublications returns unexpired grants that the coordination service
+// has not accepted yet. The daemon polls this list.
 func (s *Store) PendingPublications(ctx context.Context, now int64) ([]Grant, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, ssh_user, created_at, expires_at
@@ -294,14 +354,14 @@ func (s *Store) PurgeExpired(ctx context.Context, now, retain int64) (int64, err
 // ErrNonceReplay is returned when a nonce has already been seen in scope.
 var ErrNonceReplay = errors.New("store: nonce replay")
 
-// RememberNonce records a nonce, returning ErrNonceReplay if it was already
-// seen. Nonces older than the skew window are pruned opportunistically.
+// RememberNonce records a nonce and returns ErrNonceReplay if it was seen
+// before. It also prunes nonces older than window.
 func (s *Store) RememberNonce(ctx context.Context, scope string, nonce []byte, now, window int64) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM nonces WHERE seen_at < ?`, now-window); err != nil {
 		return err
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO nonces (nonce, scope, seen_at) VALUES (?, ?, ?)`, nonce, scope, now)
+		`INSERT OR IGNORE INTO nonces (scope, nonce, seen_at) VALUES (?, ?, ?)`, scope, nonce, now)
 	if err != nil {
 		return err
 	}
@@ -322,7 +382,7 @@ const (
 	ClaimRevoked
 	ClaimExpired
 	ClaimAlreadyRedeemed // already consumed, by anyone
-	ClaimBadProof        // proof did not verify; grant deliberately not consumed
+	ClaimBadProof        // proof did not verify, grant not consumed
 )
 
 // ClaimResult reports what happened.
@@ -332,26 +392,18 @@ type ClaimResult struct {
 	ExpiresAt int64
 }
 
-// ClaimGrant performs the single atomic step that makes a grant single-use.
+// ClaimGrant is the one atomic step that makes a grant single-use.
 //
-// The proof check runs *inside* the write transaction, after the row is locked
-// but before the transaction commits. That ordering is deliberate:
+// The proof check runs inside the write transaction, after the row is locked
+// and before the commit. Locking first serializes concurrent redemptions, so
+// only one can see redeemed_at IS NULL. Checking the proof inside the
+// transaction means a wrong proof causes a ROLLBACK and does not consume the
+// grant.
 //
-//   - Locking first means N concurrent redemptions for N different SSH keys
-//     serialize, and exactly one can observe redeemed_at IS NULL.
-//   - Verifying inside the transaction means a caller who cannot produce a
-//     valid proof causes a ROLLBACK, so a flood of wrong guesses cannot burn a
-//     legitimate grant.
+// There is no retry path. A lost response costs one more grant. See
+// protocol/v1.md section 8.
 //
-// A grant is consumed exactly once, with no exception for retries. An earlier
-// version re-issued the stored certificate when the same agent presented the
-// same key again, so that a lost response was recoverable. It was removed: it
-// was the subtlest code in the signer, it entangled the replay check with the
-// claim, and it bought a nicety. Grants are free to mint, so a lost response
-// costs one more capability rather than a special case in the one function
-// where a mistake means two keys get access.
-//
-// verify is called with the stored secret and must not retain it.
+// verify receives the stored secret and must not retain it.
 func (s *Store) ClaimGrant(
 	ctx context.Context,
 	grantID string,
@@ -412,7 +464,7 @@ func (s *Store) ClaimGrant(
 		return ClaimResult{}, err
 	}
 	if !ok {
-		// ROLLBACK via the deferred close: the grant stays unconsumed.
+		// The deferred ROLLBACK leaves the grant unconsumed.
 		return ClaimResult{Status: ClaimBadProof}, nil
 	}
 
@@ -432,8 +484,7 @@ func (s *Store) ClaimGrant(
 	return res, nil
 }
 
-// RecordCertificate stores an issued certificate so that a lost response can be
-// answered with the identical bytes rather than a second certificate.
+// RecordCertificate stores an issued certificate for audit.
 func (s *Store) RecordCertificate(ctx context.Context, serial uint64, grantID, agentID, keyFP, cert string, validAfter, validBefore, now int64) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO certificates (serial, grant_id, agent_id, key_fp, certificate, valid_after, valid_before, created_at)

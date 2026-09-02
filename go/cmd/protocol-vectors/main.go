@@ -1,13 +1,6 @@
 // Command protocol-vectors generates protocol/test-vectors/v1.json, the
-// normative cross-language conformance fixtures.
-//
-// The Go and TypeScript implementations both read this file and must agree on
-// every byte. That is the only thing that keeps two independent implementations
-// of a frozen protocol from drifting apart: "they seem to work together" is not
-// evidence, because two implementations can be wrong in the same way and still
-// interoperate.
-//
-// All key material here is fixed and public. It is test data, not secrets.
+// cross-language conformance fixtures. Every implementation must agree with
+// this file on every byte. All key material here is public test data.
 package main
 
 import (
@@ -144,9 +137,7 @@ func main() {
 	b.Vectors = append(b.Vectors, signed("agent_registration", protocol.CtxAgentRegister, areg,
 		must(areg.Canonical()), agentPriv, agentSeed))
 
-	// A string field containing multi-byte UTF-8 and a field containing an
-	// empty value, so that both implementations agree on length prefixes rather
-	// than on incidental ASCII.
+	// Multi-byte UTF-8 and an empty value exercise the length prefixes.
 	unicodeGrant := protocol.Grant{
 		Version: 1, HostID: hostID, GrantID: grantID, SSHUser: "ubuntu",
 		CreatedAt: 0, ExpiresAt: 1,
