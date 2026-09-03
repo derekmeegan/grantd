@@ -200,25 +200,84 @@ function parseCertificate(line) {
 
 // ---------------------------------------------------------------------- http
 
-async function api(method, url, body) {
-  let res;
-  try {
-    res = await fetch(url, {
-      method,
-      headers: body ? { "content-type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(60_000),
+// Node's fetch ignores HTTPS_PROXY, and many agent sandboxes reach the
+// network only through a proxy. Requests therefore go through node:http and
+// node:https, over a CONNECT tunnel when a proxy is configured.
+//
+// A proxy refusal must never be reported as if the service rejected the
+// caller. ProxyError keeps the two apart.
+class ProxyError extends Error {}
+
+// openTunnel asks the proxy for a byte pipe to host:port.
+function openTunnel(proxy, host, port, timeout) {
+  return new Promise((resolve, reject) => {
+    const s = tcpConnect({ host: proxy.host, port: proxy.port, timeout });
+    const via = `proxy ${proxy.host}:${proxy.port}`;
+    let head = "";
+    const fail = (m) => { s.destroy(); reject(new ProxyError(m)); };
+    s.on("connect", () => {
+      const auth = proxy.auth ? `Proxy-Authorization: Basic ${Buffer.from(proxy.auth).toString("base64")}\r\n` : "";
+      s.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
     });
-  } catch (e) {
-    throw new Error(`could not reach ${url}: ${e.message}`);
-  }
-  const text = await res.text();
-  if (res.ok) return text ? JSON.parse(text) : {};
+    s.on("data", function onHead(d) {
+      head += d.toString("latin1");
+      if (!head.includes("\r\n\r\n")) return;
+      s.removeListener("data", onHead);
+      const status = head.split("\r\n")[0].trim();
+      if (!/ 2\d\d /.test(status + " ")) {
+        return fail(`${via} refused a tunnel to ${host}:${port}: "${status}". This is the sandbox's network policy, not a grantd response.`);
+      }
+      s.setTimeout(0);
+      resolve(s);
+    });
+    s.on("timeout", () => fail(`${via} did not answer`));
+    s.on("error", (e) => fail(`${via}: ${e.message}`));
+  });
+}
+
+async function api(method, urlStr, body) {
+  const url = new URL(urlStr);
+  const secure = url.protocol === "https:";
+  const port = Number(url.port) || (secure ? 443 : 80);
+  const proxy = proxyFromEnv();
+  const payload = body ? JSON.stringify(body) : null;
+
+  let socket = null;
+  if (proxy) socket = await openTunnel(proxy, url.hostname, port, 15_000);
+
+  const { request } = await import(secure ? "node:https" : "node:http");
+  const { connect: tlsConnect } = await import("node:tls");
+
+  const { status, text } = await new Promise((resolve, reject) => {
+    const options = {
+      method,
+      headers: payload
+        ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }
+        : {},
+    };
+    // With a tunnel the socket already exists, so TLS runs on top of it.
+    if (socket) {
+      options.createConnection = () =>
+        secure ? tlsConnect({ socket, servername: url.hostname }) : socket;
+    }
+    const req = request(url, options, (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => { data += c; });
+      res.on("end", () => resolve({ status: res.statusCode, text: data }));
+    });
+    req.setTimeout(60_000, () => req.destroy(new Error("timed out")));
+    req.on("error", (e) => reject(new Error(`could not reach ${urlStr}: ${e.message}`)));
+    if (payload) req.write(payload);
+    req.end();
+  });
+
+  if (status >= 200 && status < 300) return text ? JSON.parse(text) : {};
   let parsed;
   try { parsed = JSON.parse(text); } catch { /* not a protocol error envelope */ }
-  if (parsed?.error?.code) throw new Error(`${parsed.error.code}: ${parsed.error.message} (from ${url})`);
-  if (res.status === 429) throw new Error(`rate limited by ${url}. Wait a minute and try again`);
-  throw new Error(`HTTP ${res.status} from ${url}: ${text.slice(0, 200)}`);
+  if (parsed?.error?.code) throw new Error(`${parsed.error.code}: ${parsed.error.message} (from ${urlStr})`);
+  if (status === 429) throw new Error(`rate limited by ${urlStr}. Wait a minute and try again`);
+  throw new Error(`HTTP ${status} from ${urlStr}: ${text.slice(0, 200)}`);
 }
 
 // -------------------------------------------------------------- validation
@@ -323,7 +382,7 @@ function readBanner(socket, seed, label, done) {
     if (buf.startsWith("SSH-")) {
       done(true, `${label}, ${buf.split("\r\n")[0].trim()}`);
     } else {
-      done(false, `${label}, but the far end sent non-SSH bytes: ${JSON.stringify(buf.slice(0, 32))}`);
+      done(false, `${label}, but the far end sent non-SSH bytes: ${JSON.stringify(buf.slice(0, 32))}`, true);
     }
     return true;
   };
@@ -350,7 +409,7 @@ function probeProxy(proxy, host, port, timeout) {
     const s = tcpConnect({ host: proxy.host, port: proxy.port, timeout });
     const via = `proxy ${proxy.host}:${proxy.port}`;
     let head = "", tunnelled = false;
-    const done = (ok, detail) => { s.destroy(); resolve({ ok, detail }); };
+    const done = (ok, detail, carriedNoSSH = false) => { s.destroy(); resolve({ ok, detail, carriedNoSSH }); };
     s.on("connect", () => {
       const auth = proxy.auth ? `Proxy-Authorization: Basic ${Buffer.from(proxy.auth).toString("base64")}\r\n` : "";
       s.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
@@ -368,15 +427,15 @@ function probeProxy(proxy, host, port, timeout) {
       s.removeListener("data", onHead);
       readBanner(s, head.split("\r\n\r\n").slice(1).join("\r\n\r\n"), `${via} opened a tunnel`, done);
     });
-    s.on("timeout", () => done(false, tunnelled
-      ? `${via} opened a tunnel to ${host}:${port} but carried no SSH. It is probably a TLS-inspecting proxy, which cannot carry SSH.`
-      : `${via} did not answer`));
+    s.on("timeout", () => tunnelled
+      ? done(false, `${via} opened a tunnel to ${host}:${port} but carried no SSH`, true)
+      : done(false, `${via} did not answer`));
     s.on("error", (e) => done(false, tunnelled
       ? `${via} reset the tunnel after CONNECT: ${e.code || e.message}`
       : `${via}: ${e.message}`));
-    s.on("end", () => done(false, tunnelled
-      ? `${via} closed the tunnel without any SSH banner. It is probably a TLS-inspecting proxy, which cannot carry SSH.`
-      : `${via} closed the connection`));
+    s.on("end", () => tunnelled
+      ? done(false, `${via} closed the tunnel without sending any SSH banner`, true)
+      : done(false, `${via} closed the connection`));
   });
 }
 
@@ -479,23 +538,36 @@ async function main() {
   const host = verifyHostRecord(cap.hostId, await api("GET", `${cap.origin}/v1/hosts/${cap.hostId}`));
   log(`target: ${host.ssh_user}@${host.hostname}:${host.ssh_port} (signed by the host)`);
 
-  // Check the path to the host before spending the grant.
+  // Check the path to the host before spending the grant. The advice has to
+  // match the actual cause: telling someone to widen an allowlist when the
+  // real problem is a TLS-inspecting proxy sends them after the wrong fix.
   if (!opts.noProbe) {
     const probe = await probeReachable(host.hostname, host.ssh_port);
     if (!probe.ok) {
+      const target = `${host.hostname}:${host.ssh_port}`;
+      let advice;
+      if (probe.carriedNoSSH) {
+        advice =
+`  The proxy authorized the tunnel and then dropped what went through it.
+  A proxy that inspects HTTPS cannot carry SSH, and no client can work
+  around that. This machine needs raw outbound TCP, or a proxy that
+  tunnels bytes without inspecting them.`;
+      } else if (probe.viaProxy) {
+        advice = `  Ask for ${target} to be allowed through the proxy.`;
+      } else {
+        advice =
+`  No HTTPS_PROXY is set. If this machine reaches the network through a
+  proxy, set it and try again.
+  If the host listens only on 22, ask its operator to re-run the installer
+  with --listen-port 443, which most sandboxes allow.`;
+      }
       throw new Error(
-`this machine cannot reach ${host.hostname}:${host.ssh_port}, so the session could not be opened.
+`this machine cannot reach ${target}, so the session could not be opened.
   ${probe.detail}
 The grant was NOT spent. It is still valid until it expires.
 
-grantd needs a path to the host's SSH port. Either raw outbound TCP, or an
-HTTP CONNECT proxy in HTTPS_PROXY that permits this host and port.
-${probe.viaProxy
-  ? "  A proxy was used. Ask for " + host.hostname + ":" + host.ssh_port + " to be allowed through it."
-  : "  No HTTPS_PROXY is set. If this machine has a proxy, set it and try again."}
-  If the host listens only on 22, ask its operator to re-run the installer
-  with --listen-port 443, which most sandboxes allow.
-  Pass --no-probe to redeem anyway.`);
+${advice}
+  Set GRANTD_NO_PROBE=1 to redeem anyway.`);
     }
     log(`reachable: ${host.hostname}:${host.ssh_port} via ${probe.viaProxy ? "HTTP CONNECT proxy" : "direct TCP"}`);
   }
