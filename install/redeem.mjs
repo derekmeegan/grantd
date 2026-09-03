@@ -12,11 +12,23 @@
 // provide. See the note it prints at the end.
 //
 // Usage:
-//   node redeem.mjs [URL] [--out DIR] [--identity FILE] [--json]
+//   node redeem.mjs [URL] [--out DIR] [--identity FILE] [--json] [--no-probe]
 //
-// The URL can also come from GRANTD_CAPABILITY, or from stdin when URL is "-".
+// Every flag has an environment variable, because node cannot pass arguments
+// to a piped module. A sandbox that refuses to save a downloaded script can
+// still run it:
+//
+//   curl -s .../redeem.mjs | GRANTD_CAPABILITY=... GRANTD_OUT=./grant \
+//     node --input-type=module
+//
+//   GRANTD_CAPABILITY  the capability URL, also readable from stdin as "-"
+//   GRANTD_OUT         directory for the key and certificate
+//   GRANTD_IDENTITY    agent identity file
+//   GRANTD_JSON        set to any value for JSON output
+//   GRANTD_NO_PROBE    set to 1 to skip the reachability check
+//
 // Other users on the same machine can read command line arguments, so prefer
-// those two forms on a shared machine.
+// the variables on a shared machine.
 
 import { createHmac, createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign, verify as edVerify } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
@@ -429,7 +441,8 @@ async function registerAgent(origin, identity, agentId, log) {
 // --------------------------------------------------------------------- main
 
 function parseArgs(argv) {
-  const opts = { url: process.env.GRANTD_CAPABILITY || "", out: "", json: false,
+  const opts = { url: process.env.GRANTD_CAPABILITY || "", out: process.env.GRANTD_OUT || "",
+                 json: Boolean(process.env.GRANTD_JSON), noProbe: process.env.GRANTD_NO_PROBE === "1",
                  identity: process.env.GRANTD_IDENTITY || join(homedir(), ".grantd", "agent_identity.pem") };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -577,9 +590,18 @@ as the private key and ${certPath} as its certificate.`);
   }
 }
 
-// Run only when invoked directly, so a test can import the pieces above and
-// check them against protocol/test-vectors/v1.json.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run when invoked directly, and when piped into node, where argv[1] is
+// absent. Some agent sandboxes refuse to save a downloaded script to disk, so
+// a pipe is the only way to execute it:
+//
+//   curl -s .../redeem.mjs | GRANTD_CAPABILITY=... node --input-type=module
+//
+// A test that imports this file leaves argv[1] pointing at the test, so main
+// does not run there.
+const pipedIntoNode = import.meta.url.includes("[eval");
+const isEntryPoint = pipedIntoNode || !process.argv[1]
+  || import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isEntryPoint) {
   main().catch((e) => { console.error(`redeem.mjs: ${e.message}`); process.exit(1); });
 }
 
