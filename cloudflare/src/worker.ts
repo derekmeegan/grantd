@@ -52,6 +52,27 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (request.method === "GET" && seg[0] === "redeem.mjs") {
     return scriptResponse(redeemNodeScript);
   }
+  // A diagnostic echo. An agent sandbox can use it to find out whether its
+  // egress carries WebSocket frames intact, which decides whether a WebSocket
+  // transport could ever reach a host from there. It echoes each frame back
+  // unchanged and keeps text and binary distinct. It holds no state, reads no
+  // grant, and can be removed once that question is settled.
+  if (request.method === "GET" && seg[0] === "ws-echo") {
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return errorResponse(ERR.BAD_REQUEST, "this endpoint requires a websocket upgrade", 426);
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+    server.accept();
+    server.addEventListener("message", (event: MessageEvent) => {
+      try {
+        server.send(event.data);
+      } catch {
+        // A closing socket is not an error worth reporting here.
+      }
+    });
+    return new Response(null, { status: 101, webSocket: client });
+  }
   if (request.method === "GET" && seg[0] === "install") {
     return scriptResponse(installScriptFile);
   }
