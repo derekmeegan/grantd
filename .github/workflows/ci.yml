@@ -185,6 +185,9 @@ jobs:
           awk --version | head -1
           sh tests/e2e/cbe-vectors.sh install/redeem.sh protocol/test-vectors/v1.json
 
+      - name: the node client agrees with the frozen vectors
+        run: node tests/e2e/node-vectors.mjs
+
       - name: uninstall cleanly
         run: |
           set -eu

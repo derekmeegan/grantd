@@ -23,6 +23,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, chmodS
 import { dirname, join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { connect as tcpConnect } from "node:net";
+import { pathToFileURL } from "node:url";
 
 const PROTOCOL_VERSION = 1;
 const SECRET_BYTES = 32;
@@ -292,33 +293,78 @@ function proxyFromEnv() {
   } catch { return null; }
 }
 
+// An open socket is not proof of a usable path. Two cases look identical
+// until the first bytes arrive:
+//
+//   A proxy that authorizes the tunnel and then requires TLS inside it
+//   answers 200 to CONNECT and silently drops an SSH banner.
+//
+//   A TCP listener on the port might be any service at all.
+//
+// sshd sends its identification string unprompted on connect (RFC 4253
+// section 4.2), so waiting one round trip for "SSH-" settles both cases and
+// costs nothing.
+function readBanner(socket, seed, label, done) {
+  let buf = seed;
+  const decide = () => {
+    if (buf.length < 4) return false;
+    if (buf.startsWith("SSH-")) {
+      done(true, `${label}, ${buf.split("\r\n")[0].trim()}`);
+    } else {
+      done(false, `${label}, but the far end sent non-SSH bytes: ${JSON.stringify(buf.slice(0, 32))}`);
+    }
+    return true;
+  };
+  if (decide()) return;
+  socket.on("data", (d) => { buf += d.toString("latin1"); decide(); });
+}
+
 function probeDirect(host, port, timeout) {
   return new Promise((resolve) => {
     const s = tcpConnect({ host, port, timeout });
+    let connected = false;
     const done = (ok, detail) => { s.destroy(); resolve({ ok, detail }); };
-    s.on("connect", () => done(true, "direct TCP"));
-    s.on("timeout", () => done(false, `no answer from ${host}:${port} within ${timeout}ms`));
+    s.on("connect", () => { connected = true; readBanner(s, "", "direct TCP", done); });
+    s.on("timeout", () => done(false, connected
+      ? `connected to ${host}:${port}, but it sent no SSH banner`
+      : `no answer from ${host}:${port} within ${timeout}ms`));
     s.on("error", (e) => done(false, e.message));
+    s.on("end", () => done(false, `${host}:${port} closed the connection without an SSH banner`));
   });
 }
 
 function probeProxy(proxy, host, port, timeout) {
   return new Promise((resolve) => {
     const s = tcpConnect({ host: proxy.host, port: proxy.port, timeout });
-    let buf = "";
+    const via = `proxy ${proxy.host}:${proxy.port}`;
+    let head = "", tunnelled = false;
     const done = (ok, detail) => { s.destroy(); resolve({ ok, detail }); };
     s.on("connect", () => {
       const auth = proxy.auth ? `Proxy-Authorization: Basic ${Buffer.from(proxy.auth).toString("base64")}\r\n` : "";
       s.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
     });
-    s.on("data", (d) => {
-      buf += d.toString("latin1");
-      if (!buf.includes("\r\n\r\n")) return;
-      const status = buf.split("\r\n")[0];
-      done(/ 2\d\d /.test(status + " "), `proxy ${proxy.host}:${proxy.port} said "${status.trim()}"`);
+    s.on("data", function onHead(d) {
+      if (tunnelled) return;
+      head += d.toString("latin1");
+      if (!head.includes("\r\n\r\n")) return;
+      const status = head.split("\r\n")[0];
+      if (!/ 2\d\d /.test(status + " ")) {
+        return done(false, `${via} refused the tunnel: "${status.trim()}"`);
+      }
+      // The tunnel is open. The server's first bytes can already be here.
+      tunnelled = true;
+      s.removeListener("data", onHead);
+      readBanner(s, head.split("\r\n\r\n").slice(1).join("\r\n\r\n"), `${via} opened a tunnel`, done);
     });
-    s.on("timeout", () => done(false, `proxy ${proxy.host}:${proxy.port} did not answer`));
-    s.on("error", (e) => done(false, `proxy ${proxy.host}:${proxy.port}: ${e.message}`));
+    s.on("timeout", () => done(false, tunnelled
+      ? `${via} opened a tunnel to ${host}:${port} but carried no SSH. It is probably a TLS-inspecting proxy, which cannot carry SSH.`
+      : `${via} did not answer`));
+    s.on("error", (e) => done(false, tunnelled
+      ? `${via} reset the tunnel after CONNECT: ${e.code || e.message}`
+      : `${via}: ${e.message}`));
+    s.on("end", () => done(false, tunnelled
+      ? `${via} closed the tunnel without any SSH banner. It is probably a TLS-inspecting proxy, which cannot carry SSH.`
+      : `${via} closed the connection`));
   });
 }
 
@@ -531,4 +577,15 @@ as the private key and ${certPath} as its certificate.`);
   }
 }
 
-main().catch((e) => { console.error(`redeem.mjs: ${e.message}`); process.exit(1); });
+// Run only when invoked directly, so a test can import the pieces above and
+// check them against protocol/test-vectors/v1.json.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => { console.error(`redeem.mjs: ${e.message}`); process.exit(1); });
+}
+
+export {
+  cbe, fString, fU64, fBytes, b64u, unb64u,
+  idOf, base32, sha256, authorizedKeyLine, sshEd25519Blob, sshFingerprint,
+  openSshPrivateKey, parseCertificate, parseCapabilityURL, verifyHostRecord,
+  probeReachable, signRaw, verifyRaw, rawPublicKey, publicKeyFromRaw, solvePow,
+};
