@@ -188,6 +188,13 @@ jobs:
       - name: the node client agrees with the frozen vectors
         run: node tests/e2e/node-vectors.mjs
 
+      # Every environment this code is written in has direct egress, so a
+      # client that ignores a configured proxy looks correct everywhere except
+      # the sandboxes it is meant for. This asserts the proxy saw the request,
+      # not that the request succeeded.
+      - name: the node client uses a configured proxy
+        run: node tests/e2e/node-proxy.mjs
+
       - name: uninstall cleanly
         run: |
           set -eu

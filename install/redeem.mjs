@@ -682,4 +682,5 @@ export {
   idOf, base32, sha256, authorizedKeyLine, sshEd25519Blob, sshFingerprint,
   openSshPrivateKey, parseCertificate, parseCapabilityURL, verifyHostRecord,
   probeReachable, signRaw, verifyRaw, rawPublicKey, publicKeyFromRaw, solvePow,
+  api, proxyFromEnv, ProxyError,
 };
