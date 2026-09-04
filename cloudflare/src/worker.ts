@@ -18,7 +18,6 @@ import redeemScript from "../../install/redeem.sh";
 import installScriptFile from "../../install/install.sh";
 import reapSessionsScript from "../../install/reap-sessions.sh";
 import redeemNodeScript from "../../install/redeem.mjs";
-import homePage from "../../web/index.html";
 import bridgeProxyScript from "../../install/bridge-proxy.py";
 import type { Env, RateLimiter } from "./env";
 
@@ -51,7 +50,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   // at api., but a hand-edited one should still work.
   if (SITE_HOSTS.has(url.hostname)) {
     if (request.method === "GET" && seg.length === 0) {
-      return textResponse(homePage, 200, "text/html; charset=utf-8");
+      return textResponse(docsMarkdown(origin), 200, "text/markdown; charset=utf-8");
     }
     return Response.redirect(`${origin}${url.pathname}${url.search}`, 308);
   }

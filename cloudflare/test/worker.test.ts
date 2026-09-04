@@ -156,23 +156,26 @@ describe("public surface", () => {
     expect(text).toContain("expired-grants");
   });
 
-  it("serves the home page on the apex and the API on api.", async () => {
+  it("serves the text page on the apex and the API on api.", async () => {
     const home = await SELF.fetch("https://grantd.dev/");
     expect(home.status).toBe(200);
-    expect(home.headers.get("content-type")).toContain("text/html");
-    const html = await home.text();
-    // People will want to read the source before trusting an installer.
-    expect(html).toContain("github.com/derekmeegan/grantd");
+    expect(home.headers.get("content-type")).toContain("text/markdown");
+    const text = await home.text();
+    // People will want to read the source before running an installer that
+    // puts a certificate authority on their machine.
+    expect(text).toContain("github.com/derekmeegan/grantd");
+    expect(text).toContain("grantd");
 
     // The apex is not the protocol. A service path there is redirected, not
-    // served, so there is only ever one origin minting capability URLs.
+    // served, so only one origin ever mints capability URLs.
     const stray = await SELF.fetch("https://grantd.dev/health", { redirect: "manual" });
     expect(stray.status).toBe(308);
     expect(stray.headers.get("location")).toContain("/health");
 
-    // The API host keeps its documentation root.
-    const api = await SELF.fetch(`${ORIGIN}/health`);
-    expect(api.status).toBe(200);
+    // The API host serves the same page, and still answers the protocol.
+    const api = await SELF.fetch(`${ORIGIN}/`);
+    expect(api.headers.get("content-type")).toContain("text/markdown");
+    expect((await SELF.fetch(`${ORIGIN}/health`)).status).toBe(200);
   });
 
   it("rejects malformed identifiers", async () => {

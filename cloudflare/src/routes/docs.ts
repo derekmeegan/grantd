@@ -21,6 +21,14 @@ fragment, from the grant's owner to its recipient, out of band.
 Protocol version: 1. Canonical encoding, message schemas and error codes are
 specified in \`protocol/v1.md\` in the source repository.
 
+Source, and every claim on this page stated as a test:
+
+    https://github.com/derekmeegan/grantd
+
+Read it before you run an installer that puts a certificate authority on your
+machine. The release you would install is signed, and the key it must be
+signed by is pinned in the installer itself.
+
 ## If you were given a capability URL
 
     https://…/g/<host_id>/<grant_id>#<secret>
