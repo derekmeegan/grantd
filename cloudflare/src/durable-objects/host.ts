@@ -29,6 +29,7 @@ import {
   SKEW_REDEMPTION,
   withinSkew,
 } from "../protocol";
+import { CLIENT_IP_HEADER, dnsConfig, hostRecordName, syncHostRecord } from "../dns";
 import type { AgentRecord } from "./agent";
 import type { Env } from "../env";
 
@@ -83,6 +84,8 @@ type HostRow = {
   last_seen_at: number;
   registration_json: string | null;
   registration_signature: string | null;
+  dns_name: string | null;
+  dns_ip: string | null;
 };
 
 type GrantRow = {
@@ -140,7 +143,9 @@ export class HostDO extends DurableObject<Env> {
         created_at          INTEGER NOT NULL,
         last_seen_at        INTEGER NOT NULL,
         registration_json      TEXT,
-        registration_signature TEXT
+        registration_signature TEXT,
+        dns_name               TEXT,
+        dns_ip                 TEXT
       );
       CREATE TABLE IF NOT EXISTS grants (
         grant_id      TEXT PRIMARY KEY,
@@ -179,6 +184,12 @@ export class HostDO extends DurableObject<Env> {
     }
     if (!columns.has("registration_signature")) {
       this.sql.exec("ALTER TABLE host ADD COLUMN registration_signature TEXT");
+    }
+    if (!columns.has("dns_name")) {
+      this.sql.exec("ALTER TABLE host ADD COLUMN dns_name TEXT");
+    }
+    if (!columns.has("dns_ip")) {
+      this.sql.exec("ALTER TABLE host ADD COLUMN dns_ip TEXT");
     }
     this.schemaReady = true;
   }
@@ -292,7 +303,19 @@ export class HostDO extends DurableObject<Env> {
     }
     await this.ensureAlarm();
     console.log(JSON.stringify({ event: "host.registered", host_id: reg.host_id }));
-    return jsonResponse({ host_id: reg.host_id, registered: true, updated: Boolean(existing) }, existing ? 200 : 201);
+
+    // Awaited, unlike the reconnect path: the installer prints the name it
+    // got, so enrolling should not report a name that does not resolve yet.
+    // A DNS failure never fails the registration.
+    const dnsName = await this.syncDns(
+      reg.host_id,
+      reg.hostname,
+      request.headers.get(CLIENT_IP_HEADER),
+    );
+    return jsonResponse(
+      { host_id: reg.host_id, registered: true, updated: Boolean(existing), dns_name: dnsName },
+      existing ? 200 : 201,
+    );
   }
 
   private publicRecord(): Response {
@@ -309,6 +332,8 @@ export class HostDO extends DurableObject<Env> {
       created_at: h.created_at,
       last_seen_at: h.last_seen_at,
       connected: this.liveSocket() !== undefined,
+      // The name this service manages for the host, when it has one.
+      dns_name: h.dns_name,
       // The last accepted registration, so a visitor can verify the record itself.
       registration: h.registration_json ? JSON.parse(h.registration_json) : null,
       signature: h.registration_signature,
@@ -388,6 +413,16 @@ export class HostDO extends DurableObject<Env> {
 
     this.sql.exec("UPDATE host SET last_seen_at = ? WHERE guard = 1", now);
     await this.ensureAlarm();
+
+    // A machine on a dynamic address moves between reconnects, and this is
+    // the only authenticated signal that it has. Not awaited: the host is
+    // waiting on this upgrade, and the record is stale either way until the
+    // call lands.
+    const clientIp = request.headers.get(CLIENT_IP_HEADER);
+    if (clientIp && clientIp !== h.dns_ip) {
+      this.ctx.waitUntil(this.syncDns(h.host_id, h.hostname, clientIp));
+    }
+
     server.send(JSON.stringify({ t: "hello", protocol_version: h.protocol_version }));
     console.log(JSON.stringify({ event: "host.connected", host_id: h.host_id }));
 
@@ -684,6 +719,55 @@ export class HostDO extends DurableObject<Env> {
   }
 
   // -------------------------------------------------------------- housekeeping
+
+  /**
+   * Points this host's managed name at `ip`. Returns the name on success,
+   * and null whenever naming is off, not asked for, or simply failed.
+   *
+   * Two separate gates decide whether a record is written, and both matter:
+   *
+   *   - the name is derived from the host id, never read from the
+   *     registration, so a host can only affect its own label; and
+   *   - the record is written only when the host's *signed* hostname is
+   *     already that derived name, which is how a host asks for one. A host
+   *     enrolled with its own address is left alone.
+   *
+   * Nothing here can fail a registration or a reconnect. A host without a
+   * name is still registered, still connected, and still reachable at the
+   * address it was enrolled with.
+   */
+  private async syncDns(
+    hostId: string,
+    signedHostname: string,
+    ip: string | null,
+  ): Promise<string | null> {
+    const cfg = dnsConfig(this.env);
+    if (!cfg || !ip) return null;
+
+    const name = hostRecordName(hostId, cfg.suffix);
+    if (!name || signedHostname.trim().toLowerCase() !== name) return null;
+
+    try {
+      const result = await syncHostRecord(cfg, name, ip);
+      if (!result.ok) {
+        console.error(
+          JSON.stringify({ event: "host.dns_failed", host_id: hostId, reason: result.reason }),
+        );
+        return null;
+      }
+      this.sql.exec("UPDATE host SET dns_name = ?, dns_ip = ? WHERE guard = 1", name, ip);
+      console.log(
+        JSON.stringify({ event: "host.dns_synced", host_id: hostId, name, type: result.type }),
+      );
+      return name;
+    } catch (e) {
+      // A timeout or a network fault reaching the Cloudflare API lands here.
+      console.error(
+        JSON.stringify({ event: "host.dns_failed", host_id: hostId, message: String(e) }),
+      );
+      return null;
+    }
+  }
 
   private seenNonce(nonce: Uint8Array, now: number): boolean {
     const key = b64uEncode(nonce);

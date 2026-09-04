@@ -15,6 +15,7 @@ ORIGIN=""
 PUBLIC_ORIGIN=""
 SSH_USER=""
 ADVERTISE_HOST=""
+DNS_SUFFIX=""
 ADVERTISE_PORT="22"
 LISTEN_PORT=""
 RELEASES_URL=""
@@ -57,12 +58,18 @@ usage() {
   cat >&2 <<USAGE
 grantd installer
 
-  sudo ./install.sh --origin URL --ssh-user ACCOUNT --hostname ADDRESS [options]
+  sudo ./install.sh --origin URL --ssh-user ACCOUNT \
+    (--hostname ADDRESS | --dns-suffix DOMAIN) [options]
 
 Required:
   --origin URL         coordination service, e.g. https://grantd.example.workers.dev
   --ssh-user ACCOUNT   the login account visiting agents will use (not root)
   --hostname ADDRESS   the address a visiting agent will SSH to
+  --dns-suffix DOMAIN  instead of --hostname: let the coordination service
+                       publish a name for this machine under DOMAIN, pointing
+                       at the address this machine connects from. The name is
+                       derived from the host id, so it is this machine's alone.
+                       The record is never proxied.
 
 Options:
   --public-origin URL  origin to embed in capability URLs (default: --origin)
@@ -109,6 +116,7 @@ while [ $# -gt 0 ]; do
     --public-origin) PUBLIC_ORIGIN="$2"; shift 2 ;;
     --ssh-user) SSH_USER="$2"; shift 2 ;;
     --hostname) ADVERTISE_HOST="$2"; shift 2 ;;
+    --dns-suffix) DNS_SUFFIX="$2"; shift 2 ;;
     --port) ADVERTISE_PORT="$2"; shift 2 ;;
     --listen-port) LISTEN_PORT="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
@@ -126,7 +134,12 @@ done
 [ "$(id -u)" -eq 0 ] || die "install.sh must run as root"
 [ -n "$ORIGIN" ] || { usage; die "--origin is required"; }
 [ -n "$SSH_USER" ] || { usage; die "--ssh-user is required"; }
-[ -n "$ADVERTISE_HOST" ] || { usage; die "--hostname is required"; }
+if [ -n "$ADVERTISE_HOST" ] && [ -n "$DNS_SUFFIX" ]; then
+  usage; die "pass either --hostname or --dns-suffix, not both"
+fi
+if [ -z "$ADVERTISE_HOST" ] && [ -z "$DNS_SUFFIX" ]; then
+  usage; die "one of --hostname or --dns-suffix is required"
+fi
 [ -n "$PUBLIC_ORIGIN" ] || PUBLIC_ORIGIN="$ORIGIN"
 [ -n "$RELEASES_URL" ] || RELEASES_URL="${ORIGIN%/}/releases"
 [ -n "$RELEASE_KEY" ] || RELEASE_KEY="$DEFAULT_RELEASE_KEY"
@@ -431,18 +444,33 @@ done
 # A clean environment: the signer reads GRANTD_* variables, and a stray one
 # from the caller's shell must not move the keys somewhere the unit does not
 # look. The paths are passed explicitly and match the unit below.
+# One of the two, checked in preflight. The signer refuses both.
+if [ -n "$DNS_SUFFIX" ]; then
+  ADDRESS_ARGS=(--dns-suffix "$DNS_SUFFIX")
+else
+  ADDRESS_ARGS=(--hostname "$ADVERTISE_HOST")
+fi
+
 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
   runuser -u grantsigner -- "$LIBDIR/grant-signer" init \
     --key-dir "$CONFDIR" \
     --state "$STATE_DB" \
     --ssh-user "$SSH_USER" \
-    --hostname "$ADVERTISE_HOST" \
+    "${ADDRESS_ARGS[@]}" \
     --port "$ADVERTISE_PORT" \
     --origin "$PUBLIC_ORIGIN" > "$WORK/enroll.json" \
   || die "enrollment failed"
 
 HOST_ID="$(json_str "$WORK/enroll.json" host_id)"
 [ -n "$HOST_ID" ] || die "enrollment did not produce a host id"
+
+# With --dns-suffix the signer derived the address from the host id. Read it
+# back so that everything after this point reports the real one.
+ADVERTISE_HOST="$(json_str "$WORK/enroll.json" hostname)"
+[ -n "$ADVERTISE_HOST" ] || die "enrollment did not produce a hostname"
+if [ -n "$DNS_SUFFIX" ]; then
+  log "this machine will be published as $ADVERTISE_HOST"
+fi
 
 # ---------------------------------------------------------------------- sshd
 

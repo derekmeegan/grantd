@@ -138,6 +138,19 @@ sudo bash install --origin https://grantd.example.workers.dev \
   --ssh-user <an unprivileged account> --hostname <the address visitors dial>
 ```
 
+If the machine has no stable address to hand out, swap `--hostname` for
+`--dns-suffix` and let the service publish one for it:
+
+```sh
+sudo bash install --origin https://grantd.example.workers.dev \
+  --ssh-user <an unprivileged account> --dns-suffix hosts.example.com
+```
+
+The name is derived from the host id, so it is this machine's and no other's,
+and the record is never proxied — SSH still goes direct. This requires the
+service to be configured for it; see
+[`cloudflare/README.md`](cloudflare/README.md#host-dns-naming).
+
 Fetching `install` from the service means trusting the service to deliver
 that one script. If that is not acceptable, use
 [`install/install.sh`](install/install.sh) from a tagged release of this

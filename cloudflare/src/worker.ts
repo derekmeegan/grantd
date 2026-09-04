@@ -11,6 +11,7 @@
 import { ERR, errorResponse, jsonResponse, scriptResponse, textResponse } from "./errors";
 import { AGENT_ID_RE, CHALLENGE_ID_RE, GRANT_ID_RE, HOST_ID_RE, newChallengeId } from "./crypto/ids";
 import { MAX_REQUEST_BYTES, parseJsonObject } from "./protocol";
+import { CLIENT_IP_HEADER } from "./dns";
 import { docsMarkdown, grantInstructions } from "./routes/docs";
 // Imported as text so the script agents download is the one the test suite runs.
 import redeemScript from "../../install/redeem.sh";
@@ -170,18 +171,24 @@ async function v1(request: Request, env: Env, seg: string[]): Promise<Response> 
         const body = await readJson(request);
         if (body instanceof Response) return body;
         init.body = JSON.stringify(body);
-        init.headers = { "content-type": "application/json" };
+        // Built fresh, so nothing the caller sent reaches the object as its
+        // own address. See CLIENT_IP_HEADER.
+        const headers = new Headers({ "content-type": "application/json" });
+        setClientIp(headers, request);
+        init.headers = headers;
       }
       return await stub.fetch(new Request(`https://do/host/${hostId}`, init));
     }
 
     // Rendezvous upgrade. The headers carry the host's signature. The body is empty.
     if (rest.length === 1 && rest[0] === "connect" && request.method === "GET") {
+      // The signature headers must reach the object intact, so these are the
+      // caller's own headers. Overwrite the address header on the copy: a
+      // host must not be able to name the address its record points at.
+      const headers = new Headers(request.headers);
+      setClientIp(headers, request);
       return await stub.fetch(
-        new Request(`https://do/host/${hostId}/connect`, {
-          method: "GET",
-          headers: request.headers,
-        }),
+        new Request(`https://do/host/${hostId}/connect`, { method: "GET", headers }),
       );
     }
 
@@ -274,6 +281,19 @@ async function readJson(request: Request): Promise<Record<string, unknown> | Res
   const parsed = parseJsonObject(raw);
   if (!parsed) return errorResponse(ERR.BAD_REQUEST, "body must be a JSON object");
   return parsed;
+}
+
+/**
+ * Stamps the caller's address onto a request headed for a Durable Object.
+ *
+ * Always sets or deletes, never leaves what was there. CF-Connecting-IP is
+ * set by Cloudflare itself, so its absence means the request did not arrive
+ * through the edge and there is no address worth trusting.
+ */
+function setClientIp(headers: Headers, request: Request): void {
+  const ip = request.headers.get("CF-Connecting-IP");
+  if (ip) headers.set(CLIENT_IP_HEADER, ip);
+  else headers.delete(CLIENT_IP_HEADER);
 }
 
 /**

@@ -12,6 +12,11 @@ node_modules/
 .dev.vars
 .dev.vars.*
 
+# credentials — never commit these
+.env
+.env.*
+!.env.example
+
 # local state and key material — never commit these
 *.db
 *.db-wal

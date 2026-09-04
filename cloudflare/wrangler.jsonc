@@ -11,7 +11,15 @@
   // script agents download is always the one the test suite exercises.
   "rules": [{ "type": "Text", "globs": ["**/*.sh", "**/redeem.mjs"] }],
   "vars": {
-    "PUBLIC_ORIGIN": ""
+    "PUBLIC_ORIGIN": "",
+    // Host DNS naming. The matching CF_DNS_TOKEN is a secret, set with
+    // `wrangler secret put CF_DNS_TOKEN`, and is never written here. All
+    // three must be present for a host to get a name; see src/dns.ts.
+    "HOST_ZONE_ID": "a077892337e6864464478d0f488852b0",
+    // hosts.grantd.dev needs no record of its own. Hosts create individual
+    // names under it. The subdomain exists so that an operator can allowlist
+    // *.hosts.grantd.dev without that covering api. or the apex.
+    "HOST_DNS_SUFFIX": "hosts.grantd.dev"
   },
   "durable_objects": {
     "bindings": [

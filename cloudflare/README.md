@@ -82,6 +82,57 @@ Cloudflare", not "attacker stripped it".
 None of this is SSH authorization. All four layers can fail completely and a
 visiting agent still cannot obtain a certificate without the grant secret.
 
+## Host DNS naming
+
+Optional. A host enrolled with `--dns-suffix hosts.example.com` gets one
+unproxied address record pointing at the address its machine connects from, so
+an operator does not have to find and hand over a stable address per box.
+
+```
+"vars": {
+  "HOST_ZONE_ID": "<zone id>",
+  "HOST_DNS_SUFFIX": "hosts.example.com"
+}
+```
+
+```
+npx wrangler secret put CF_DNS_TOKEN     # never in wrangler.jsonc
+```
+
+The token is the first credential this service holds that reaches outside
+itself, so its scope is the whole argument. Create it as a custom token with
+**Zone → DNS → Edit** on that one zone and nothing else. What that buys: the
+worst a total compromise of this Worker can do with it is point a name at the
+wrong address. Pinning turns that into a refused connection rather than a
+session with a stranger, because the visiting agent verifies the host
+certificate against the CA in the grant — an address is not an identity here.
+
+Two rules in `src/dns.ts` keep it that narrow, and both matter:
+
+* **The record name is derived from the host id**, which is a hash of the
+  host's identity key. It is never read from the registration. A host can only
+  ever cause a write to its own 32-character label, so an enrolled machine
+  cannot take over `api.`, the apex, or another host's name.
+* **The record is written only when the host's *signed* hostname already is
+  that derived name.** That is how a host asks for one. A host enrolled with
+  its own address is left alone entirely — no call is made.
+
+`proxied: false` is set explicitly on every write rather than left to the zone
+default, which an operator can change. Proxying an SSH address would route the
+session through Cloudflare, and "direct SSH, never proxied" is a property the
+protocol promises. In the dashboard the record must show a grey cloud; an
+orange one means that promise has quietly stopped being true.
+
+All three settings must be present or the feature is off — a half-configured
+deployment does nothing rather than guessing. Nothing here can fail an
+enrollment: every DNS error is logged (`host.dns_failed`) and swallowed, and a
+host that never gets a name is still registered, still connected, and still
+reachable at whatever address it was enrolled with.
+
+The suffix needs no record of its own. It exists so that an operator can
+allowlist `*.hosts.example.com` without that covering `api.` or anything else
+on the apex.
+
 ## What this Worker cannot do
 
 The adversarial tests in `test/worker.test.ts` and `tests/adversarial/` assert

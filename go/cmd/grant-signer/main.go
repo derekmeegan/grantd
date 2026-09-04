@@ -65,7 +65,7 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `grant-signer — grantd local trust root
 
-  grant-signer init    --ssh-user U --hostname H [--port 22] [--origin URL]
+  grant-signer init    --ssh-user U (--hostname H | --dns-suffix D) [--port 22] [--origin URL]
   grant-signer serve   [--owner-uid N] [--daemon-uid N]
   grant-signer status
   grant-signer destroy --yes
@@ -141,15 +141,27 @@ func cmdInit(args []string, log *slog.Logger) error {
 	p.bind(fs)
 	sshUser := fs.String("ssh-user", "", "the login account visiting agents will use (root is rejected)")
 	hostname := fs.String("hostname", "", "address a visiting agent will SSH to")
+	dnsSuffix := fs.String("dns-suffix", "", "let the service name this host under a suffix it manages, e.g. hosts.grantd.dev")
 	port := fs.Uint64("port", 22, "SSH port")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *sshUser == "" || *hostname == "" {
-		return errors.New("init requires --ssh-user and --hostname")
+	if *sshUser == "" {
+		return errors.New("init requires --ssh-user")
+	}
+	// Exactly one. The two answer the same question — what does a visiting
+	// agent dial — and taking both would leave which one won up to reading
+	// the source.
+	if (*hostname == "") == (*dnsSuffix == "") {
+		return errors.New("init requires exactly one of --hostname or --dns-suffix")
 	}
 	if err := protocol.ValidateSSHUser(*sshUser); err != nil {
 		return err
+	}
+	if *dnsSuffix != "" {
+		if err := protocol.ValidateDNSSuffix(*dnsSuffix); err != nil {
+			return err
+		}
 	}
 
 	if err := os.MkdirAll(p.keyDir, idkey.KeyDirMode); err != nil {
@@ -179,12 +191,26 @@ func cmdInit(args []string, log *slog.Logger) error {
 	}
 	defer s.Close()
 
-	ctx := context.Background()
-	if err := s.Enroll(ctx, *sshUser, *hostname, *port); err != nil {
-		return err
-	}
 	hostID, err := s.HostID()
 	if err != nil {
+		return err
+	}
+
+	// With --dns-suffix the address is derived from the host id rather than
+	// supplied. The service derives the same name and will write a record for
+	// that name and no other, so the two must agree exactly. Deriving it here
+	// also means the name is inside the signed registration: asking for a
+	// name and proving the key are one act.
+	enrollHostname := *hostname
+	if *dnsSuffix != "" {
+		enrollHostname, err = protocol.HostDNSName(hostID, *dnsSuffix)
+		if err != nil {
+			return err
+		}
+	}
+
+	ctx := context.Background()
+	if err := s.Enroll(ctx, *sshUser, enrollHostname, *port); err != nil {
 		return err
 	}
 	caLine, err := s.SSHCAPublicKeyLine()
@@ -194,7 +220,7 @@ func cmdInit(args []string, log *slog.Logger) error {
 	out, _ := json.MarshalIndent(map[string]any{
 		"host_id":           hostID,
 		"ssh_user":          *sshUser,
-		"hostname":          *hostname,
+		"hostname":          enrollHostname,
 		"ssh_port":          *port,
 		"ssh_ca_public_key": caLine,
 		"state":             p.state,

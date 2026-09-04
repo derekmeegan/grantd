@@ -44,6 +44,44 @@ func ValidateHostname(h string) error {
 	return nil
 }
 
+// dnsSuffixRe is the suffix this client will build a host name under. It
+// mirrors SUFFIX_RE in cloudflare/src/dns.ts: the two implementations must
+// agree, or a host signs a name the service will not write.
+var dnsSuffixRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+// hostLabelRe is the base32 label a host id carries after its "h_" prefix.
+var hostLabelRe = regexp.MustCompile(`^[a-z2-7]{32}$`)
+
+// ValidateDNSSuffix checks a suffix host names may be built under.
+func ValidateDNSSuffix(s string) error {
+	if s == "" {
+		return fmt.Errorf("dns suffix is required")
+	}
+	if !dnsSuffixRe.MatchString(strings.ToLower(s)) {
+		return fmt.Errorf("dns suffix %q is not a valid domain name", s)
+	}
+	return nil
+}
+
+// HostDNSName derives the one name the coordination service will publish for
+// a host. It is a pure function of the host id, which is a hash of the host's
+// identity key, so a host cannot ask for any other name. This must match
+// hostRecordName() in cloudflare/src/dns.ts.
+func HostDNSName(hostID, suffix string) (string, error) {
+	if err := ValidateDNSSuffix(suffix); err != nil {
+		return "", err
+	}
+	label, ok := strings.CutPrefix(hostID, "h_")
+	if !ok || !hostLabelRe.MatchString(label) {
+		return "", fmt.Errorf("host id %q is malformed", hostID)
+	}
+	name := label + "." + strings.ToLower(suffix)
+	if err := ValidateHostname(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 // ValidatePort checks an SSH port.
 func ValidatePort(p uint64) error {
 	if p == 0 || p > 65535 {
