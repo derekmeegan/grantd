@@ -13,6 +13,14 @@ name: ci
 # `native-amd64` installs the published release named by GRANTD_VERSION, not
 # the Go code in the checkout. That release must carry a signed VERSION file,
 # or the installer refuses it.
+#
+# `native-amd64` and `e2e` test deployed things — the published release and the
+# coordination service at GRANTD_ORIGIN — and neither is deployed by CI:
+# releases are signed with an offline key, and the Worker is deployed by hand.
+# Running them on every push therefore reports red after any merge that
+# changes the protocol, until someone deploys, which says nothing about the
+# code. They run on workflow_dispatch instead, after a deploy or a release.
+# `go` and `worker` test the checkout itself and run on every push.
 
 on:
   push:
@@ -78,6 +86,7 @@ jobs:
       - run: npm test
 
   native-amd64:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -215,6 +224,7 @@ jobs:
           test ! -e /etc/ssh/sshd_config.d/60-grantd.conf
 
   e2e:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
