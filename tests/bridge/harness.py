@@ -123,29 +123,42 @@ try:
         fail("the shim's --probe did not find the bridge")
 
     # 2. A session carries bytes both ways, unaltered.
-    p = subprocess.Popen([sys.executable, shim, "wss://localhost:%d/ssh" % front],
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, env=env)
-    p.stdin.write(PAYLOAD)
-    p.stdin.flush()
-    want = len(BANNER) + len(PAYLOAD)
-    out = b""
-    deadline = time.time() + 20
-    import select
-    while len(out) < want and time.time() < deadline:
-        r, _, _ = select.select([p.stdout], [], [], 0.5)
-        if r:
-            chunk = os.read(p.stdout.fileno(), 65536)
-            if not chunk:
-                break
-            out += chunk
-    p.kill()
+    #
+    # Once with Python's default buffered stdio and once with
+    # PYTHONUNBUFFERED=1, which containers and CI commonly set. The shim reads
+    # the raw file objects under sys.stdin/stdout, and those are shaped
+    # differently in the two modes: a regression here showed up only in the
+    # sandbox that most needs the bridge.
+    for unbuffered in ("", "1"):
+        session_env = dict(env)
+        if unbuffered:
+            session_env["PYTHONUNBUFFERED"] = unbuffered
+        else:
+            session_env.pop("PYTHONUNBUFFERED", None)
+        p = subprocess.Popen([sys.executable, shim, "wss://localhost:%d/ssh" % front],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=session_env)
+        p.stdin.write(PAYLOAD)
+        p.stdin.flush()
+        want = len(BANNER) + len(PAYLOAD)
+        out = b""
+        deadline = time.time() + 20
+        import select
+        while len(out) < want and time.time() < deadline:
+            r, _, _ = select.select([p.stdout], [], [], 0.5)
+            if r:
+                chunk = os.read(p.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                out += chunk
+        p.kill()
 
-    if out[:len(BANNER)] != BANNER:
-        fail("banner = %r, want %r" % (out[:len(BANNER)], BANNER))
-    if out[len(BANNER):] != PAYLOAD:
-        fail("the transport was not byte-exact:\n    got  %r\n    want %r"
-             % (out[len(BANNER):], PAYLOAD))
+        if out[:len(BANNER)] != BANNER:
+            fail("banner = %r, want %r (PYTHONUNBUFFERED=%r)"
+                 % (out[:len(BANNER)], BANNER, unbuffered))
+        if out[len(BANNER):] != PAYLOAD:
+            fail("the transport was not byte-exact:\n    got  %r\n    want %r"
+                 % (out[len(BANNER):], PAYLOAD))
 
     # 3. Only wss. A visitor must not be talked into an unencrypted transport.
     r = subprocess.run([sys.executable, shim, "ws://localhost:%d/ssh" % front],

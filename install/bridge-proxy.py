@@ -220,7 +220,12 @@ def main():
         return
     reader = Reader(sock, leftover)
 
-    stdin, stdout = sys.stdin.buffer.raw, sys.stdout.buffer.raw
+    # The raw FileIO underneath, so select() and read() see bytes as they
+    # arrive rather than after a buffer fills. Under PYTHONUNBUFFERED=1, which
+    # containers and CI commonly set, .buffer already *is* the raw FileIO and
+    # has no .raw of its own.
+    stdin = getattr(sys.stdin.buffer, "raw", sys.stdin.buffer)
+    stdout = getattr(sys.stdout.buffer, "raw", sys.stdout.buffer)
     sock.setblocking(False)
     while True:
         try:
