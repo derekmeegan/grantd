@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # The bridge carries an SSH transport byte for byte.
 #
@@ -10,9 +10,10 @@
 # The bridged bytes are an SSH transport. A frame boundary in the wrong place,
 # a helpful newline translation, or a dropped high byte would each produce a
 # session that negotiates and then fails, so the assertion is byte equality.
-set -euo pipefail
+# POSIX sh: this runs under dash in CI, which has no pipefail.
+set -eu
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
