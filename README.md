@@ -188,7 +188,7 @@ is worth stating plainly. SSH is never proxied through the coordination
 service, so the visitor must be able to open a connection to the host itself.
 Raw outbound TCP satisfies this. So does an HTTP `CONNECT` proxy named in
 `HTTPS_PROXY`, because `CONNECT` builds a byte pipe and SSH runs over it
-unchanged. Many sandboxes allow `CONNECT` only to port 443, which is why the
+unchanged. Hosts listed in `NO_PROXY` are reached directly, as curl does. Many sandboxes allow `CONNECT` only to port 443, which is why the
 installer takes `--listen-port 443`.
 
 Both redeemers check that path before they spend the grant and refuse with an

@@ -117,6 +117,35 @@ const direct = await client.api("GET", `${base}/v1/hosts/h_test`);
 check("works with no proxy configured", direct.hello === "world");
 check("no proxy was used when none is set", connects === 0);
 
+// 6. NO_PROXY is honoured, the way curl honours it. A sandbox that sets
+//    HTTPS_PROXY also lists loopback and its directly reachable hosts in
+//    NO_PROXY; sending those through the proxy anyway fails with an upstream
+//    error that looks like the service being down. That is how this bug hid:
+//    the shell client uses curl, which reads the list, and worked.
+process.env.HTTPS_PROXY = `http://127.0.0.1:${proxyPort}`;
+for (const [list, expectDirect, why] of [
+  ["127.0.0.1", true, "an exact address"],
+  ["localhost,127.0.0.0/8", true, "a CIDR range"],
+  ["example.com", false, "an unrelated entry"],
+  ["*", true, "a wildcard"],
+]) {
+  process.env.NO_PROXY = list;
+  connects = 0;
+  const r = await client.api("GET", `${base}/v1/hosts/h_test`);
+  check(`NO_PROXY=${list}: reaches the service`, r.hello === "world");
+  check(`NO_PROXY=${list}: ${expectDirect ? "bypasses" : "still uses"} the proxy (${why})`,
+    connects === (expectDirect ? 0 : 1));
+}
+process.env.NO_PROXY = ".example.com, api.other.net:443 ,::1";
+check("suffix with a leading dot matches a subdomain", client.bypassesProxy("api.example.com"));
+check("suffix without a leading dot also matches a subdomain", (process.env.NO_PROXY = "example.com", client.bypassesProxy("api.example.com")));
+check("suffix does not match a lookalike", !client.bypassesProxy("notexample.com"));
+check("an entry with a port matches its host", (process.env.NO_PROXY = "api.other.net:443", client.bypassesProxy("api.other.net")));
+check("an IPv6 entry is not mangled as host:port", (process.env.NO_PROXY = "::1", client.bypassesProxy("::1") && !client.bypassesProxy(":")));
+check("lowercase no_proxy is read too", (delete process.env.NO_PROXY, process.env.no_proxy = "127.0.0.1", client.bypassesProxy("127.0.0.1")));
+delete process.env.no_proxy;
+delete process.env.HTTPS_PROXY;
+
 service.close();
 proxy.close();
 console.log(fail ? "\nFAIL" : "\nall proxy transport checks passed");

@@ -353,10 +353,19 @@ note "pinned: host key $HOST_KEY_FP"
 
 probe() { # probe HOST PORT -> 0 if reachable
   _proxy="${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}"
+  # NO_PROXY, as curl reads it. The API calls above already honour it, since
+  # plain curl does; this probe names the proxy explicitly with -x, which
+  # would otherwise override the list and send a loopback or allowlisted host
+  # through the proxy, where it fails in a way that reads as the host being
+  # down. An exact match goes to the direct probe below, which reads the SSH
+  # banner; anything subtler (a suffix, a CIDR) is left to curl's own --noproxy.
+  _np="${NO_PROXY:-${no_proxy:-}}"
+  case ",$(printf '%s' "$_np" | tr -d ' ')," in *",$1,"*|*",*,"*) _proxy="" ;; esac
   if [ -n "$_proxy" ]; then
     _ph="$(printf '%s' "$_proxy" | sed 's|^[a-zA-Z]*://||; s|/.*$||; s|^.*@||')"
     # -sS, not -s. Silent mode hides the message this check reads.
-    _err="$(curl -sS -o /dev/null --max-time 10 --proxytunnel -x "$_proxy" "https://$1:$2" 2>&1)"
+    _err="$(curl -sS -o /dev/null --max-time 10 --proxytunnel -x "$_proxy" \
+      ${_np:+"--noproxy=$_np"} "https://$1:$2" 2>&1)"
     _rc=$?
     # A refused tunnel names the status. curl 8 says "CONNECT tunnel failed,
     # response 403" and older curl says "code 403 from proxy after CONNECT".

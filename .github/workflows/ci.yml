@@ -31,7 +31,7 @@ permissions:
 env:
   GRANTD_ORIGIN: ${{ github.event.inputs.origin || 'https://grantd.derekmeegan.workers.dev' }}
   # Actions are pinned to commit hashes. Update the hash and the comment together.
-  GRANTD_VERSION: v0.2.0
+  GRANTD_VERSION: v0.3.0
 
 jobs:
   go:

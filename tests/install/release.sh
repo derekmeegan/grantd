@@ -13,7 +13,7 @@ ORIGIN="${GRANTD_TEST_ORIGIN:-https://grantd.derekmeegan.workers.dev}"
 # Pinned rather than tracking latest, so a failure here is unambiguous: it means
 # this release broke, not that someone published a new one mid-run. Bump it when
 # you cut a release.
-VERSION="${GRANTD_TEST_VERSION:-v0.2.0}"
+VERSION="${GRANTD_TEST_VERSION:-v0.3.0}"
 PLATFORM="${GRANTD_TEST_PLATFORM:-}"
 CONTAINER=grantd-release-test
 IMAGE=grantd-install-test

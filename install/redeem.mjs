@@ -239,7 +239,7 @@ async function api(method, urlStr, body) {
   const url = new URL(urlStr);
   const secure = url.protocol === "https:";
   const port = Number(url.port) || (secure ? 443 : 80);
-  const proxy = proxyFromEnv();
+  const proxy = proxyFor(url.hostname);
   const payload = body ? JSON.stringify(body) : null;
 
   let socket = null;
@@ -373,6 +373,48 @@ function proxyFromEnv() {
   } catch { return null; }
 }
 
+// NO_PROXY, read the way curl reads it: a comma-separated list of hosts that
+// must not go through the proxy. An entry matches its host exactly or as a
+// domain suffix (a leading dot is optional), "*" matches everything, and an
+// IPv4 CIDR matches an address inside it.
+//
+// This matters in exactly the sandboxes the proxy support exists for. They
+// set HTTPS_PROXY and list loopback and the hosts they allow direct in
+// NO_PROXY. Sending those through the proxy anyway fails with an upstream
+// error that reads as the service being down, which is how this bug hid:
+// curl honours the list, so the shell client worked where this one did not.
+function bypassesProxy(host) {
+  const raw = process.env.NO_PROXY || process.env.no_proxy;
+  if (!raw) return false;
+  const h = String(host).toLowerCase().replace(/^\[|\]$/g, "");
+  const ip4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  const toNum = (m) => ((+m[1] << 24) | (+m[2] << 16) | (+m[3] << 8) | +m[4]) >>> 0;
+  for (let entry of raw.split(",")) {
+    entry = entry.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry === "*") return true;
+    const cidr = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/.exec(entry);
+    if (cidr) {
+      if (!ip4) continue;
+      const bits = Number(cidr[2]);
+      const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+      const net = toNum(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(cidr[1]));
+      if ((toNum(ip4) & mask) === (net & mask)) return true;
+      continue;
+    }
+    // "host:port" is allowed in the list; an IPv6 literal is not "host:port".
+    if (/^[^:]+:\d+$/.test(entry)) entry = entry.replace(/:\d+$/, "");
+    entry = entry.replace(/^\./, "");
+    if (h === entry || h.endsWith("." + entry)) return true;
+  }
+  return false;
+}
+
+// The proxy to use for one host, or null to go direct.
+function proxyFor(host) {
+  return bypassesProxy(host) ? null : proxyFromEnv();
+}
+
 // An open socket is not proof of a usable path. Two cases look identical
 // until the first bytes arrive:
 //
@@ -449,7 +491,7 @@ function probeProxy(proxy, host, port, timeout) {
 }
 
 async function probeReachable(host, port, timeout = 8000) {
-  const proxy = proxyFromEnv();
+  const proxy = proxyFor(host);
   const result = proxy ? await probeProxy(proxy, host, port, timeout) : await probeDirect(host, port, timeout);
   return { ...result, viaProxy: Boolean(proxy) };
 }
@@ -699,6 +741,8 @@ if (isEntryPoint) {
 }
 
 export {
+  bypassesProxy,
+  proxyFor,
   cbe, fString, fU64, fBytes, b64u, unb64u,
   idOf, base32, sha256, authorizedKeyLine, sshEd25519Blob, sshFingerprint,
   openSshPrivateKey, parseCertificate, parseCapabilityURL, verifyHostRecord,
