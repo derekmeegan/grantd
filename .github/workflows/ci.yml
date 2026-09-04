@@ -181,9 +181,10 @@ jobs:
           done
           sudo journalctl -u grantd.service -b --no-pager | grep -q "rendezvous connected"
 
-          # Minted as root, the owner. agentuser is the account visitors log
+          # Minted as the owner, which with no --owner-user is the account
+          # that ran sudo: the runner. agentuser is the account visitors log
           # in as and deliberately cannot mint; that is asserted below.
-          URL=$(sudo curl -s --unix-socket /run/grantd/owner/owner.sock \
+          URL=$(curl -s --unix-socket /run/grantd/owner/owner.sock \
                   -X POST http://localhost/grants -H 'content-type: application/json' \
                   -d '{"ttl_seconds":600}' \
                 | sed -n 's/.*"capability_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
