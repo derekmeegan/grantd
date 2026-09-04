@@ -35,7 +35,7 @@ curl -s --unix-socket /run/grantd/owner/owner.sock \
 ```json
 { "grant_id": "g_4mmhs4dd4ww5qvnb",
   "expires_at": 1788283057,
-  "capability_url": "https://grantd.example.workers.dev/g/h_ubk4.../g_4mmh...#uJN2fx..." }
+  "capability_url": "https://api.grantd.dev/g/h_ubk4.../g_4mmh...#uJN2fx..." }
 ```
 
 Send that URL to the recipient over any channel you trust.
@@ -43,8 +43,8 @@ Send that URL to the recipient over any channel you trust.
 **The agent receiving access**, anywhere on the internet:
 
 ```sh
-curl -sO https://grantd.example.workers.dev/redeem.sh
-GRANTD_CAPABILITY='https://grantd.example.workers.dev/g/h_ubk4.../g_4mmh...#uJN2fx...' sh redeem.sh
+curl -sO https://api.grantd.dev/redeem.sh
+GRANTD_CAPABILITY='https://api.grantd.dev/g/h_ubk4.../g_4mmh...#uJN2fx...' sh redeem.sh
 ```
 
 It verifies the host's signed registration, generates a throwaway SSH key,
@@ -144,8 +144,8 @@ embedded in it.
 On the machine you want to share:
 
 ```sh
-curl -sO https://grantd.example.workers.dev/install
-sudo bash install --origin https://grantd.example.workers.dev \
+curl -sO https://api.grantd.dev/install
+sudo bash install --origin https://api.grantd.dev \
   --ssh-user <an unprivileged account> --hostname <the address visitors dial>
 ```
 
@@ -153,7 +153,7 @@ If the machine has no stable address to hand out, swap `--hostname` for
 `--dns-suffix` and let the service publish one for it:
 
 ```sh
-sudo bash install --origin https://grantd.example.workers.dev \
+sudo bash install --origin https://api.grantd.dev \
   --ssh-user <an unprivileged account> --dns-suffix hosts.example.com
 ```
 
@@ -243,7 +243,7 @@ This is designed to be adopted without a human present, in both directions.
 for you:
 
 ```sh
-curl https://grantd.example.workers.dev/g/<host_id>/<grant_id>
+curl https://api.grantd.dev/g/<host_id>/<grant_id>
 ```
 
 You get the exact requests to make, in plain text. There is no SDK, and

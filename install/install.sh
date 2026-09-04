@@ -47,7 +47,7 @@ DAEMON_UNIT=/etc/systemd/system/grantd.service
 # origin to hand you an honest script. The signature matters when this script
 # arrives another way (a git checkout, a package, a copy you have read) and the
 # release bucket is the thing you are unsure about.
-DEFAULT_RELEASE_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN+NinC05+tSWFnXFK1Fkb7H0t5emBjKJKgd/ZSKO7UP"
+DEFAULT_RELEASE_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC9pwb+PFN4sQGiE1betNWba9+5/4vgXcOU/1zbO0RlD"
 
 # ------------------------------------------------------------------- helpers
 
@@ -63,7 +63,7 @@ grantd installer
     (--hostname ADDRESS | --dns-suffix DOMAIN) [options]
 
 Required:
-  --origin URL         coordination service, e.g. https://grantd.example.workers.dev
+  --origin URL         coordination service, e.g. https://api.grantd.dev
   --ssh-user ACCOUNT   the login account visiting agents will use (not root)
   --hostname ADDRESS   the address a visiting agent will SSH to
   --dns-suffix DOMAIN  instead of --hostname: let the coordination service

@@ -18,6 +18,7 @@ import redeemScript from "../../install/redeem.sh";
 import installScriptFile from "../../install/install.sh";
 import reapSessionsScript from "../../install/reap-sessions.sh";
 import redeemNodeScript from "../../install/redeem.mjs";
+import homePage from "../../web/index.html";
 import bridgeProxyScript from "../../install/bridge-proxy.py";
 import type { Env, RateLimiter } from "./env";
 
@@ -36,10 +37,24 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+/** Hostnames that serve the home page rather than the API. */
+const SITE_HOSTS = new Set(["grantd.dev", "www.grantd.dev"]);
+
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const origin = env.PUBLIC_ORIGIN || url.origin;
   const seg = url.pathname.split("/").filter(Boolean);
+
+  // The apex is the home page. The protocol lives on api., so a visitor who
+  // lands on a service path here is sent there rather than shown a 404 —
+  // capability URLs are minted against PUBLIC_ORIGIN and should already point
+  // at api., but a hand-edited one should still work.
+  if (SITE_HOSTS.has(url.hostname)) {
+    if (request.method === "GET" && seg.length === 0) {
+      return textResponse(homePage, 200, "text/html; charset=utf-8");
+    }
+    return Response.redirect(`${origin}${url.pathname}${url.search}`, 308);
+  }
 
   if (request.method === "GET" && seg.length === 0) {
     return textResponse(docsMarkdown(origin), 200, "text/markdown; charset=utf-8");

@@ -31,15 +31,15 @@ on:
       origin:
         description: coordination service to test against
         required: false
-        default: https://grantd.derekmeegan.workers.dev
+        default: https://api.grantd.dev
 
 permissions:
   contents: read
 
 env:
-  GRANTD_ORIGIN: ${{ github.event.inputs.origin || 'https://grantd.derekmeegan.workers.dev' }}
+  GRANTD_ORIGIN: ${{ github.event.inputs.origin || 'https://api.grantd.dev' }}
   # Actions are pinned to commit hashes. Update the hash and the comment together.
-  GRANTD_VERSION: v0.5.0
+  GRANTD_VERSION: v0.6.0
 
 jobs:
   go:

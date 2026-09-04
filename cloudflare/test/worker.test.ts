@@ -156,6 +156,25 @@ describe("public surface", () => {
     expect(text).toContain("expired-grants");
   });
 
+  it("serves the home page on the apex and the API on api.", async () => {
+    const home = await SELF.fetch("https://grantd.dev/");
+    expect(home.status).toBe(200);
+    expect(home.headers.get("content-type")).toContain("text/html");
+    const html = await home.text();
+    // People will want to read the source before trusting an installer.
+    expect(html).toContain("github.com/derekmeegan/grantd");
+
+    // The apex is not the protocol. A service path there is redirected, not
+    // served, so there is only ever one origin minting capability URLs.
+    const stray = await SELF.fetch("https://grantd.dev/health", { redirect: "manual" });
+    expect(stray.status).toBe(308);
+    expect(stray.headers.get("location")).toContain("/health");
+
+    // The API host keeps its documentation root.
+    const api = await SELF.fetch(`${ORIGIN}/health`);
+    expect(api.status).toBe(200);
+  });
+
   it("rejects malformed identifiers", async () => {
     expect((await SELF.fetch(`${ORIGIN}/g/nope/also-nope`)).status).toBe(400);
     expect((await SELF.fetch(`${ORIGIN}/v1/hosts/h_short`)).status).toBe(400);
