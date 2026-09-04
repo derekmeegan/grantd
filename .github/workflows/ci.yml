@@ -55,6 +55,11 @@ jobs:
         run: |
           go run ./cmd/protocol-vectors /tmp/regen.json
           diff -u ../protocol/test-vectors/v1.json /tmp/regen.json
+      - name: every visitor ssh invocation pins the host key
+        # StrictHostKeyChecking=no on a grantd certificate undoes the visitor's
+        # only protection against being sent to the wrong machine. It is the
+        # flag someone reaches for when a connection stops to ask.
+        run: sh tests/lint/visitor-ssh-pinned.sh
 
   worker:
     runs-on: ubuntu-latest
@@ -172,10 +177,15 @@ jobs:
           sudo -u agentuser env GRANTD_IDENTITY=/tmp/v/id.pem \
             sh install/redeem.sh --out /tmp/v "$URL"
 
+          # redeem.sh verified the signed record and wrote a known_hosts keyed
+          # by host id. BatchMode forbids a prompt, so this only passes if the
+          # pin matches without one.
+          HOST_ID=$(printf '%s' "${URL%%#*}" | awk -F/ '{print $(NF-1)}')
           OUT=$(sudo -u agentuser ssh -i /tmp/v/id_ed25519 \
                   -o CertificateFile=/tmp/v/id_ed25519-cert.pub -o IdentitiesOnly=yes \
-                  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                  -o LogLevel=ERROR agentuser@127.0.0.1 whoami)
+                  -o UserKnownHostsFile=/tmp/v/known_hosts -o StrictHostKeyChecking=yes \
+                  -o HostKeyAlias="$HOST_ID" -o HostKeyAlgorithms=ssh-ed25519 -o BatchMode=yes \
+                  -o LogLevel=ERROR -l agentuser -- 127.0.0.1 whoami)
           echo "logged in as: $OUT"
           test "$OUT" = "agentuser"
 

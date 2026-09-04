@@ -182,6 +182,18 @@ if ! grep -qsE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/s
   die "/etc/ssh/sshd_config does not Include /etc/ssh/sshd_config.d/*.conf; refusing to install a snippet that sshd would ignore"
 fi
 
+# grantd publishes this machine's ssh host key in its signed record so that a
+# visiting agent can pin it. Without one there is nothing to verify against,
+# so enrollment would fail later anyway; say so now, before anything changes.
+# The key is not generated here: creating host keys is sshd's job.
+SSH_HOST_KEY_PUB="${GRANTD_SSH_HOST_KEY_FILE:-/etc/ssh/ssh_host_ed25519_key.pub}"
+if [ ! -r "$SSH_HOST_KEY_PUB" ]; then
+  die "no readable ed25519 host key at $SSH_HOST_KEY_PUB.
+grantd publishes it so visiting agents can verify this machine.
+Generate host keys with:  sudo ssh-keygen -A
+then run this installer again."
+fi
+
 log "installing grantd"
 echo "    origin:        $ORIGIN"
 echo "    capability URL origin: $PUBLIC_ORIGIN"
@@ -458,7 +470,8 @@ env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
     --ssh-user "$SSH_USER" \
     "${ADDRESS_ARGS[@]}" \
     --port "$ADVERTISE_PORT" \
-    --origin "$PUBLIC_ORIGIN" > "$WORK/enroll.json" \
+    --origin "$PUBLIC_ORIGIN" \
+    --ssh-host-key-file "$SSH_HOST_KEY_PUB" > "$WORK/enroll.json" \
   || die "enrollment failed"
 
 HOST_ID="$(json_str "$WORK/enroll.json" host_id)"
@@ -748,6 +761,7 @@ $(log "grantd installed")
     host id:    $HOST_ID
     ssh user:   $SSH_USER
     advertised: $ADVERTISE_HOST:$ADVERTISE_PORT
+    host key:   $(ssh-keygen -lf "$SSH_HOST_KEY_PUB" 2>/dev/null | awk '{print $2}')
     rendezvous: $ONLINE
 
 Mint a 30-minute capability as $SSH_USER:

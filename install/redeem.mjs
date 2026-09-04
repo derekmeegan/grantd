@@ -322,6 +322,7 @@ function verifyHostRecord(hostId, record) {
     fString("host_id", reg.host_id),
     fBytes("identity_public_key", identity),
     fString("ssh_ca_public_key", reg.ssh_ca_public_key),
+    fString("ssh_host_public_key", reg.ssh_host_public_key),
     fString("hostname", reg.hostname),
     fU64("ssh_port", reg.ssh_port),
     fString("ssh_user", reg.ssh_user),
@@ -342,7 +343,15 @@ function verifyHostRecord(hostId, record) {
   if (ca.length !== 2 || ca[0] !== "ssh-ed25519") throw new Error("the host record carries a malformed SSH CA key");
   const caReader = sshReader(Buffer.from(ca[1], "base64"));
   if (caReader.string().toString() !== "ssh-ed25519") throw new Error("the SSH CA key is not ssh-ed25519");
-  return { ...reg, caKey: caReader.string() };
+
+  // The key sshd will present. The CA key verifies this agent to the host;
+  // this verifies the host to this agent. A certificate cannot do that job.
+  const hk = typeof reg.ssh_host_public_key === "string" ? reg.ssh_host_public_key.split(" ") : [];
+  if (hk.length !== 2 || hk[0] !== "ssh-ed25519") throw new Error("the host record carries no usable SSH host key");
+  const hkReader = sshReader(Buffer.from(hk[1], "base64"));
+  if (hkReader.string().toString() !== "ssh-ed25519") throw new Error("the SSH host key is not ssh-ed25519");
+  if (reg.ssh_host_public_key === reg.ssh_ca_public_key) throw new Error("the host record uses its CA key as its host key");
+  return { ...reg, caKey: caReader.string(), hostKeyLine: reg.ssh_host_public_key };
 }
 
 // -------------------------------------------------------------- reachability
@@ -634,6 +643,10 @@ ${advice}
 
   const keyPath = join(out, "id_ed25519");
   const certPath = join(out, "id_ed25519-cert.pub");
+  // Pinned by host id, which HostKeyAlias looks up: the entry does not depend
+  // on how the address is spelled or how the connection is carried.
+  const knownHostsPath = join(out, "known_hosts");
+  writeFileSync(knownHostsPath, `${cap.hostId} ${host.hostKeyLine}\n`, { mode: 0o600 });
   writeFileSync(keyPath, openSshPrivateKey(rawSeed(ephemeral.privateKey), sshRawPub, "grantd ephemeral"), { mode: 0o600 });
   chmodSync(keyPath, 0o600);
   writeFileSync(keyPath + ".pub", sshLine + "\n", { mode: 0o644 });
@@ -641,7 +654,8 @@ ${advice}
 
   if (opts.json) {
     console.log(JSON.stringify({
-      ...response, key_file: keyPath, certificate_file: certPath,
+      ...response, key_file: keyPath, certificate_file: certPath, known_hosts_file: knownHostsPath,
+      host_key_alias: cap.hostId,
       key_fingerprint: sshFingerprint(sshEd25519Blob(sshRawPub)),
       valid_before_iso: new Date(Number(cert.validBefore) * 1000).toISOString(),
     }, null, 2));
@@ -654,7 +668,14 @@ verified: certificate from the host's CA, for this key, principal ${host.ssh_use
 ssh -i '${keyPath}' \\
     -o CertificateFile='${certPath}' \\
     -o IdentitiesOnly=yes \\
+    -o UserKnownHostsFile='${knownHostsPath}' \\
+    -o StrictHostKeyChecking=yes \\
+    -o HostKeyAlias=${cap.hostId} \\
+    -o HostKeyAlgorithms=ssh-ed25519 \\
     -l '${host.ssh_user}' -p ${host.ssh_port} -- '${host.hostname}'
+
+The host key is pinned in ${knownHostsPath}, keyed by host id. Keep those
+options: without them ssh accepts whatever machine answers the address.
 
 This script does not open the session. If there is no ssh binary here, use a
 JavaScript SSH client such as ssh2, loading ${keyPath}

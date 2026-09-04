@@ -155,6 +155,8 @@ export interface HostRegistration {
   host_id: string;
   identity_public_key: Uint8Array;
   ssh_ca_public_key: string;
+  /** The sshd host key a visitor pins. ssh_ca_public_key verifies the visitor; this verifies the host. */
+  ssh_host_public_key: string;
   hostname: string;
   ssh_port: bigint;
   ssh_user: string;
@@ -169,6 +171,7 @@ export function parseHostRegistration(raw: unknown): HostRegistration {
     host_id: str(o, "host_id", 64),
     identity_public_key: bytes(o, "identity_public_key", 32),
     ssh_ca_public_key: str(o, "ssh_ca_public_key", MAX_SSH_PUBKEY_BYTES),
+    ssh_host_public_key: str(o, "ssh_host_public_key", MAX_SSH_PUBKEY_BYTES),
     hostname: str(o, "hostname", MAX_HOSTNAME_BYTES),
     ssh_port: int(o, "ssh_port"),
     ssh_user: str(o, "ssh_user", MAX_USERNAME_BYTES),
@@ -180,6 +183,13 @@ export function parseHostRegistration(raw: unknown): HostRegistration {
   if (m.ssh_port === 0n || m.ssh_port > 65535n) bad("ssh_port out of range");
   if (m.ssh_user === "root") bad("root may not be enrolled");
   if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(m.ssh_user)) bad("malformed ssh_user");
+  // A visitor pins this string, so a record carrying something it cannot use
+  // is refused here rather than published and discovered at connect time.
+  try {
+    parseSshEd25519Line(m.ssh_host_public_key);
+  } catch {
+    bad("ssh_host_public_key must be a two-field ssh-ed25519 authorized_keys line");
+  }
   return m;
 }
 
@@ -190,6 +200,7 @@ export function serializeHostRegistration(m: HostRegistration): Record<string, u
     host_id: m.host_id,
     identity_public_key: b64uEncode(m.identity_public_key),
     ssh_ca_public_key: m.ssh_ca_public_key,
+    ssh_host_public_key: m.ssh_host_public_key,
     hostname: m.hostname,
     ssh_port: Number(m.ssh_port),
     ssh_user: m.ssh_user,
@@ -204,6 +215,7 @@ export const canonicalHostRegistration = (m: HostRegistration): Uint8Array =>
     S("host_id", m.host_id),
     B("identity_public_key", m.identity_public_key),
     S("ssh_ca_public_key", m.ssh_ca_public_key),
+    S("ssh_host_public_key", m.ssh_host_public_key),
     S("hostname", m.hostname),
     U("ssh_port", m.ssh_port),
     S("ssh_user", m.ssh_user),

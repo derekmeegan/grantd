@@ -31,6 +31,12 @@ install -d -m 0755 /run/sshd
 install -d -m 2770 -o grantsigner -g "$SSH_USER" /run/grantd/owner
 install -d -m 2770 -o grantsigner -g grantd /run/grantd/redeem
 
+# Host keys first: grant-signer init reads the ed25519 host key to publish it
+# in the signed record, so generating them after enrollment leaves nothing to
+# read.
+echo "==> generating ssh host keys"
+ssh-keygen -A >/dev/null
+
 echo "==> enrolling"
 setpriv --reuid=grantsigner --regid=grantsigner --clear-groups \
   /usr/local/bin/grant-signer init \
@@ -50,7 +56,6 @@ CONF
 
 echo "==> validating sshd configuration"
 # Never reload sshd on a configuration that does not parse.
-ssh-keygen -A >/dev/null
 /usr/sbin/sshd -t
 
 echo "==> starting sshd"

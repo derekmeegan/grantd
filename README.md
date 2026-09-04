@@ -96,7 +96,11 @@ hour later.
    transmit fragments, so the service receives the path and never the capability.
 4. Redeeming proves possession by HMAC over the request, keyed with that secret.
    The host verifies it locally and signs an SSH certificate.
-5. The agent connects **directly** to the host. SSH traffic never touches the
+5. Before redeeming, the agent fetches the host's signed record, checks that
+   the identity key in it hashes to the `host_id` its capability URL already
+   names, and verifies the signature. It takes the address and the SSH host
+   key from that record and pins the host key.
+6. The agent connects **directly** to the host. SSH traffic never touches the
    coordination service.
 
 ### What the service never sees
@@ -172,7 +176,9 @@ sudo ./uninstall.sh --yes
 
 ### Requirements
 
-**Host:** Linux, systemd, OpenSSH, `amd64` or `arm64`, outbound HTTPS.
+**Host:** Linux, systemd, OpenSSH with an ed25519 host key
+(`/etc/ssh/ssh_host_ed25519_key.pub`, which every distribution generates on
+install and `ssh-keygen -A` creates), `amd64` or `arm64`, outbound HTTPS.
 
 **Visitor:** a path to the host's SSH port, plus either `curl`, `ssh` and
 OpenSSL 3.x, or Node 18 and an SSH client library.
@@ -217,6 +223,13 @@ your work before talking to anything real.
 Keep the part after `#`. It is the capability, the service cannot recover it for
 you, and anyone who reads it has the access you were given.
 
+Before redeeming, fetch `GET /v1/hosts/<host_id>` and verify it: the record must
+name your `host_id`, the identity key in it must hash to that `host_id`, and the
+signature must verify under that key. Take the address and the SSH host key
+from the record and pin the host key when you connect. Both redeemers do this;
+[`protocol/v1.md` §7.1](protocol/v1.md) specifies it. Skipping the pin hands
+whoever resolves the address the choice of which machine you land on.
+
 **If you want to grant access**, `POST /grants` on the owner Unix socket. That
 socket is reachable only by the enrolled account on that machine — there is no
 remote endpoint that creates grants, deliberately. You can only share a machine
@@ -246,7 +259,17 @@ Stated as invariants, each one tested:
    signs arbitrary bytes. The signer itself runs with no network at all.
 8. The visitor accepts only a hostname, port, user, and certificate that the
    host signed, either directly (the registration) or through its CA (the
-   certificate). A compromised service cannot redirect a visitor.
+   certificate), and pins the SSH host key the host published in that same
+   signed record. A compromised service can refuse to route a visitor; it
+   cannot send one to a machine it controls — not even by pointing a name
+   it resolves at a machine of its own, because the key does not match.
+
+Invariants 1–7 protect the host from the service. Invariant 8 protects the
+visitor from it. The two halves of invariant 8 do different jobs: the
+certificate proves the visitor to the host, and the pinned host key proves the
+host to the visitor. For an agent, the second matters as much as the first — a
+shell on an attacker's box is an attacker-controlled input channel into
+whatever the agent does next.
 
 The rendezvous protocol has five message types and no generic RPC frame. There
 is no message that carries a command, a path, or a filename, and there will not

@@ -37,6 +37,11 @@ vec() { jq -r --arg c "$1" --arg f "$2" '.vectors[] | select(.context == $c) | .
 key() { jq -r --arg k "$1" '.keys[$k]' "$VECTORS"; }
 id()  { jq -r --arg k "$1" '.identifiers[$k]' "$VECTORS"; }
 ssh_key() { jq -r '.ssh_keys.agent_ssh_public_key' "$VECTORS"; }
+host_ssh_key() { jq -r '.ssh_keys.host_ssh_public_key' "$VECTORS"; }
+ca_key() { jq -r '.ssh_keys.ssh_ca_public_key' "$VECTORS"; }
+# By name: two vectors share the host-register context.
+reg() { jq -r --arg f "$1" '.vectors[] | select(.name == "host_registration") | .[$f]' "$VECTORS"; }
+reg_msg() { jq -r --arg f "$1" '.vectors[] | select(.name == "host_registration") | .message[$f]' "$VECTORS"; }
 
 fail=0
 say() { printf '  %s %s\n' "$1" "$2"; }
@@ -89,6 +94,45 @@ check "agent registration bytes (separate arguments)" \
 # --- identifier derivation
 DERIVED="$(agent_id_of "$APK")"
 check "agent_id derivation" "$DERIVED" "$AGENT"
+
+# --- host registration: ten fields, plus the derivation and signature check a
+# --- visiting agent performs before it will connect to anything.
+HPK="$(key host_identity_pub_hex)"
+check "host_id derivation" "$(host_id_of "$HPK")" "$HOST"
+
+REG_CBE="$(cbe 'grantd/v1/host-register' 10 \
+  "$(f_u64 version 1)" \
+  "$(f_string host_id "$HOST")" \
+  "$(f_bytes identity_public_key "$HPK")" \
+  "$(f_string ssh_ca_public_key "$(ca_key)")" \
+  "$(f_string ssh_host_public_key "$(host_ssh_key)")" \
+  "$(f_string hostname "$(reg_msg hostname)")" \
+  "$(f_u64 ssh_port "$(reg_msg ssh_port)")" \
+  "$(f_string ssh_user "$(reg_msg ssh_user)")" \
+  "$(f_u64 timestamp "$(reg_msg timestamp)")" \
+  "$(f_bytes nonce "$(b64u_decode_hex "$(reg_msg nonce)")")")"
+check "host registration bytes" "$REG_CBE" "$(reg canonical_hex)"
+
+# The verifier itself: it must accept the genuine signature and reject a
+# corrupted one, or every check before it is decoration.
+REG_SIG="$(reg signature_hex)"
+if ed25519_verify_hex "$HPK" "$REG_CBE" "$REG_SIG"; then
+  say ok "host registration signature verifies [$LOCALE_LABEL]"
+else
+  say FAIL "host registration signature verifies [$LOCALE_LABEL]"; fail=1
+fi
+# Flip a character in the middle. The last base64url/hex digit of a 64-byte
+# value can decode to the same bytes, which would make this test pass for
+# nothing.
+MID=$(( ${#REG_SIG} / 2 ))
+MIDCH="$(printf '%s' "$REG_SIG" | cut -c$((MID + 1)))"
+case "$MIDCH" in 0) NEWCH=1 ;; *) NEWCH=0 ;; esac
+BAD_SIG="$(printf '%s' "$REG_SIG" | cut -c1-"$MID")$NEWCH$(printf '%s' "$REG_SIG" | cut -c$((MID + 2))-)"
+if ed25519_verify_hex "$HPK" "$REG_CBE" "$BAD_SIG"; then
+  say FAIL "a corrupted host registration signature was accepted [$LOCALE_LABEL]"; fail=1
+else
+  say ok "a corrupted host registration signature is rejected [$LOCALE_LABEL]"
+fi
 
 }
 

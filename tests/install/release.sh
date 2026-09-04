@@ -184,10 +184,13 @@ if [ -n "$URL" ]; then
     "GRANTD_IDENTITY=/tmp/v/id.pem sh /opt/grantd-install/redeem.sh --out /tmp/v '$URL'" \
     >/tmp/rel-redeem.log 2>&1 \
     && ok "redeemed" || { bad "redeem failed"; tail -4 /tmp/rel-redeem.log; }
+  # .../g/<host_id>/<grant_id>#<secret>: the host id keys the pinned entry.
+  HOST_ID="$(printf '%s' "${URL%%#*}" | awk -F/ '{print $(NF-1)}')"
   OUT=$(docker exec -u ubuntu "$CONTAINER" sh -c \
-    'ssh -i /tmp/v/id_ed25519 -o CertificateFile=/tmp/v/id_ed25519-cert.pub \
-      -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR ubuntu@127.0.0.1 whoami' 2>&1 | tr -d '[:space:]')
+    "ssh -i /tmp/v/id_ed25519 -o CertificateFile=/tmp/v/id_ed25519-cert.pub \
+      -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/v/known_hosts \
+      -o StrictHostKeyChecking=yes -o HostKeyAlias=$HOST_ID -o HostKeyAlgorithms=ssh-ed25519 \
+      -o BatchMode=yes -o LogLevel=ERROR -l ubuntu -- 127.0.0.1 whoami" 2>&1 | tr -d '[:space:]')
   [ "$OUT" = "ubuntu" ] && ok "SSH login using the downloaded, signature-verified build" \
     || bad "ssh failed: $OUT"
 fi

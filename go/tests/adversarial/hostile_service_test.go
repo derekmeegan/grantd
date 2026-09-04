@@ -224,7 +224,15 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sg.Close() })
-	if err := sg.Enroll(context.Background(), "ubuntu", "127.0.0.1", 22); err != nil {
+	hostKeyPub, _, err := idkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostKeyLine, err := idkey.PublicSSHLine(hostKeyPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sg.Enroll(context.Background(), "ubuntu", "127.0.0.1", 22, hostKeyLine); err != nil {
 		t.Fatal(err)
 	}
 

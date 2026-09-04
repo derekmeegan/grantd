@@ -15,12 +15,13 @@ import (
 
 // Deterministic seeds so the vectors are reproducible.
 var (
-	hostSeed  = mustHex("0101010101010101010101010101010101010101010101010101010101010101")
-	agentSeed = mustHex("0202020202020202020202020202020202020202020202020202020202020202")
-	caSeed    = mustHex("0303030303030303030303030303030303030303030303030303030303030303")
-	secret    = mustHex("a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90")
-	nonceA    = mustHex("000102030405060708090a0b0c0d0e0f")
-	nonceB    = mustHex("f0e0d0c0b0a090807060504030201000")
+	hostSeed    = mustHex("0101010101010101010101010101010101010101010101010101010101010101")
+	agentSeed   = mustHex("0202020202020202020202020202020202020202020202020202020202020202")
+	caSeed      = mustHex("0303030303030303030303030303030303030303030303030303030303030303")
+	hostSSHSeed = mustHex("0404040404040404040404040404040404040404040404040404040404040404")
+	secret      = mustHex("a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90")
+	nonceA      = mustHex("000102030405060708090a0b0c0d0e0f")
+	nonceB      = mustHex("f0e0d0c0b0a090807060504030201000")
 )
 
 type vector struct {
@@ -59,11 +60,14 @@ func main() {
 
 	caLine := sshLine(caPub)
 	agentSSHLine := sshLine(agentPub)
+	// The host's sshd host key: what a visiting agent pins.
+	hostSSHLine := sshLine(ed25519.NewKeyFromSeed(hostSSHSeed).Public().(ed25519.PublicKey))
 
 	b := bundle{
 		Description: "grantd v1 normative cross-language test vectors. All keys are public test data.",
 		Version:     protocol.Version,
 		Keys: map[string]string{
+			"host_ssh_seed_hex":       hex.EncodeToString(hostSSHSeed),
 			"host_identity_seed_hex":  hex.EncodeToString(hostSeed),
 			"host_identity_pub_hex":   hex.EncodeToString(hostPub),
 			"agent_identity_seed_hex": hex.EncodeToString(agentSeed),
@@ -78,6 +82,7 @@ func main() {
 		},
 		SSHKeys: map[string]string{
 			"ssh_ca_public_key":    caLine,
+			"host_ssh_public_key":  hostSSHLine,
 			"agent_ssh_public_key": agentSSHLine,
 		},
 		Capability: map[string]string{
@@ -89,8 +94,9 @@ func main() {
 
 	reg := protocol.HostRegistration{
 		Version: 1, HostID: hostID, IdentityPublicKey: hostPub,
-		SSHCAPublicKey: caLine, Hostname: "box.example.com",
-		SSHPort: 22, SSHUser: "ubuntu", Timestamp: 1756598400, Nonce: nonceA,
+		SSHCAPublicKey: caLine, SSHHostPublicKey: hostSSHLine,
+		Hostname: "box.example.com",
+		SSHPort:  22, SSHUser: "ubuntu", Timestamp: 1756598400, Nonce: nonceA,
 	}
 	b.Vectors = append(b.Vectors, signed("host_registration", protocol.CtxHostRegister, reg,
 		must(reg.Canonical()), hostPriv, hostSeed))
@@ -147,8 +153,9 @@ func main() {
 
 	unicodeReg := protocol.HostRegistration{
 		Version: 1, HostID: hostID, IdentityPublicKey: hostPub,
-		SSHCAPublicKey: caLine, Hostname: "höst.example.com",
-		SSHPort: 65535, SSHUser: "u", Timestamp: 2147483647, Nonce: nonceB,
+		SSHCAPublicKey: caLine, SSHHostPublicKey: hostSSHLine,
+		Hostname: "höst.example.com",
+		SSHPort:  65535, SSHUser: "u", Timestamp: 2147483647, Nonce: nonceB,
 	}
 	b.Vectors = append(b.Vectors, signed("host_registration_unicode_hostname", protocol.CtxHostRegister, unicodeReg,
 		must(unicodeReg.Canonical()), hostPriv, hostSeed))

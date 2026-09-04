@@ -293,6 +293,7 @@ REG_VERSION="$(json_num "$REG" version)"
 REG_HOST_ID="$(json_str "$REG" host_id)"
 REG_PUB_HEX="$(b64u_decode_hex "$(json_str "$REG" identity_public_key)")"
 CA_PUB="$(json_str "$REG" ssh_ca_public_key)"
+HOST_KEY="$(json_str "$REG" ssh_host_public_key)"
 HOST="$(json_str "$REG" hostname)"
 PORT="$(json_num "$REG" ssh_port)"
 USER="$(json_str "$REG" ssh_user)"
@@ -304,16 +305,22 @@ REG_SIG_HEX="$(b64u_decode_hex "$(json_str "$RECORD" signature)")"
 [ "$REG_HOST_ID" = "$HOST_ID" ] || die "host record is for a different host"
 [ "$(host_id_of "$REG_PUB_HEX")" = "$HOST_ID" ] || die "host identity key does not match the host id"
 matches "$CA_PUB" '^ssh-ed25519 [A-Za-z0-9+/]+=*$' || die "host record carries a malformed SSH CA key"
+# The key sshd will present. The CA key is how the host verifies this agent;
+# this is how this agent verifies the host. A record without one cannot be
+# pinned, and an unpinned connection goes to whatever machine answers.
+matches "$HOST_KEY" '^ssh-ed25519 [A-Za-z0-9+/]+=*$' || die "host record carries no usable SSH host key"
+[ "$HOST_KEY" != "$CA_PUB" ] || die "host record uses its CA key as its host key"
 matches "$HOST" '^[][A-Za-z0-9._:][][A-Za-z0-9._:-]{0,252}$' || die "host record carries a malformed hostname"
 matches "$PORT" '^[0-9]{1,5}$' && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "host record carries a bad port"
 matches "$USER" '^[a-z_][a-z0-9_-]{0,31}$' || die "host record carries a bad user name"
 [ "$USER" != root ] || die "host record names root"
 
-REG_CBE="$(cbe 'grantd/v1/host-register' 9 \
+REG_CBE="$(cbe 'grantd/v1/host-register' 10 \
     "$(f_u64    version 1)" \
     "$(f_string host_id "$HOST_ID")" \
     "$(f_bytes  identity_public_key "$REG_PUB_HEX")" \
     "$(f_string ssh_ca_public_key "$CA_PUB")" \
+    "$(f_string ssh_host_public_key "$HOST_KEY")" \
     "$(f_string hostname "$HOST")" \
     "$(f_u64    ssh_port "$PORT")" \
     "$(f_string ssh_user "$USER")" \
@@ -325,6 +332,15 @@ ed25519_verify_hex "$REG_PUB_HEX" "$REG_CBE" "$REG_SIG_HEX" \
 printf '%s\n' "$CA_PUB" > "$WORK/ca.pub"
 CA_FP="$(ssh-keygen -lf "$WORK/ca.pub" | awk '{print $2}')"
 note "target: $USER@$HOST:$PORT (signed by the host)"
+
+# Pin the host key now, keyed by host id via HostKeyAlias below, so the entry
+# does not depend on how the address is spelled or on how the connection is
+# carried. StrictHostKeyChecking=yes then makes the wrong machine a refusal.
+KNOWN_HOSTS="$OUT/known_hosts"
+printf '%s %s\n' "$HOST_ID" "$HOST_KEY" > "$KNOWN_HOSTS"
+printf '%s\n' "$HOST_KEY" > "$WORK/hostkey.pub"
+HOST_KEY_FP="$(ssh-keygen -lf "$WORK/hostkey.pub" | awk '{print $2}')"
+note "pinned: host key $HOST_KEY_FP"
 
 # ---------------------------------------------------------- reachability
 #
@@ -536,10 +552,17 @@ echo "$RESP"
 
 # ---------------------------------------------------------------- connect
 
+# The pinned form is the only form this script emits. Without a known_hosts
+# entry ssh cannot prompt when there is no terminal and fails, and the reflex
+# fix, StrictHostKeyChecking=no, accepts whatever machine answers.
 if [ "$CONNECT" -eq 1 ]; then
   exec ssh -i "$OUT/id_ed25519" \
     -o CertificateFile="$CERT_FILE" \
     -o IdentitiesOnly=yes \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+    -o StrictHostKeyChecking=yes \
+    -o HostKeyAlias="$HOST_ID" \
+    -o HostKeyAlgorithms=ssh-ed25519 \
     -l "$USER" -p "$PORT" -- "$HOST" "$@"
 fi
 
@@ -548,5 +571,11 @@ cat >&2 <<EOF
 ssh -i '$OUT/id_ed25519' \\
     -o CertificateFile='$CERT_FILE' \\
     -o IdentitiesOnly=yes \\
+    -o UserKnownHostsFile='$KNOWN_HOSTS' \\
+    -o StrictHostKeyChecking=yes \\
+    -o HostKeyAlias=$HOST_ID \\
+    -o HostKeyAlgorithms=ssh-ed25519 \\
     -l '$USER' -p $PORT -- '$HOST'
+
+The host key is pinned in $KNOWN_HOSTS, keyed by host id. Keep those options.
 EOF

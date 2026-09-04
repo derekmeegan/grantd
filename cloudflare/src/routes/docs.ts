@@ -148,12 +148,30 @@ Redeem it like this.
    key, and names only that user. protocol/v1.md section 7.1 lists the exact
    steps.
 
-7. Save the certificate next to your key and connect. Pass the user and the
-   host as separate arguments. Never build "user@host" from untrusted text.
+   The certificate proves your key was signed by the host's CA. It says
+   nothing about which machine answers the address. For that, the record
+   carries registration.ssh_host_public_key: the key sshd will present. Pin
+   it. Without the pin, whoever resolves the address chooses the machine.
+
+7. Save the certificate, pin the host key, and connect. Pass the user and
+   the host as separate arguments. Never build "user@host" from untrusted
+   text. The known_hosts entry is keyed by host id, which HostKeyAlias looks
+   up, so the pin does not depend on how the address is spelled.
 
      printf '%s\\n' "$certificate" > ./grantd-key-cert.pub
+     printf '%s %s\\n' "${hostId}" "$ssh_host_public_key" > ./grantd-known-hosts
+
      ssh -i ./grantd-key -o CertificateFile=./grantd-key-cert.pub \\
+       -o IdentitiesOnly=yes \\
+       -o UserKnownHostsFile=./grantd-known-hosts \\
+       -o StrictHostKeyChecking=yes \\
+       -o HostKeyAlias=${hostId} \\
+       -o HostKeyAlgorithms=ssh-ed25519 \\
        -l "$user" -p "$port" -- "$hostname"
+
+   Do not replace these with StrictHostKeyChecking=no. Without a known_hosts
+   entry ssh cannot prompt when there is no terminal and fails; turning the
+   check off to make that go away accepts whatever machine answers.
 
 If you would rather not implement this yourself, redeem.sh does the whole
 flow, including every check above, with curl, openssl and ssh-keygen:

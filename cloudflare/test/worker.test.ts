@@ -184,11 +184,13 @@ describe("host registration", () => {
       "identity_public_key",
       "nonce",
       "ssh_ca_public_key",
+      "ssh_host_public_key",
       "ssh_port",
       "ssh_user",
       "timestamp",
       "version",
     ]);
+    expect(body.registration.ssh_host_public_key).toBe(host.hostKeyLine);
 
     // Verify the way a visitor does: from the parsed fields, under the identity key.
     const reg = parseHostRegistration(body.registration);
@@ -209,6 +211,33 @@ describe("host registration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(await errCode(res)).toBe("ID_MISMATCH");
+  });
+
+  it("rejects a registration carrying an unusable host key", async () => {
+    const host = await TestHost.create();
+    for (const bad of ["ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB", `${host.hostKeyLine} root@box`, "", "ssh-ed25519"]) {
+      const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}`, {
+        method: "PUT",
+        body: JSON.stringify(await host.registrationBody({ ssh_host_public_key: bad })),
+        headers: { "content-type": "application/json" },
+      });
+      expect(await errCode(res), `host key ${JSON.stringify(bad)} was accepted`).toBe("BAD_REQUEST");
+    }
+  });
+
+  it("rejects a registration whose host key was swapped after signing", async () => {
+    // The substitution a hostile service would make: leave the address alone
+    // and point the pin at a machine it holds the key for.
+    const host = await TestHost.create();
+    const other = await TestHost.create();
+    const body = (await host.registrationBody()) as Record<string, unknown>;
+    (body.registration as Record<string, unknown>).ssh_host_public_key = other.hostKeyLine;
+    const res = await SELF.fetch(`${ORIGIN}/v1/hosts/${host.hostId}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+    });
+    expect(await errCode(res)).toBe("BAD_SIGNATURE");
   });
 
   it("rejects a tampered registration field", async () => {

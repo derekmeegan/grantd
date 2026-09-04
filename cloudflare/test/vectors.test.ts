@@ -65,6 +65,7 @@ function canonicalFor(v: Vector): Uint8Array {
         host_id: s(m.host_id),
         identity_public_key: b(m.identity_public_key),
         ssh_ca_public_key: s(m.ssh_ca_public_key),
+        ssh_host_public_key: s(m.ssh_host_public_key),
         hostname: s(m.hostname),
         ssh_port: n(m.ssh_port),
         ssh_user: s(m.ssh_user),

@@ -22,14 +22,22 @@ import (
 var (
 	ErrHostRecordMismatch = errors.New("agent: host record does not belong to the host in the capability url")
 	ErrHostRecordSig      = errors.New("agent: host registration signature does not verify")
+	ErrHostRecordNoKey    = errors.New("agent: host record carries no usable ssh host key")
 	ErrResponseMismatch   = errors.New("agent: redemption response disagrees with the host's signed registration")
 	ErrCertificate        = errors.New("agent: certificate is not acceptable")
 )
 
 // VerifiedHost is a host registration that passed VerifyHostRecord.
+//
+// CAKey is how the host verifies the visitor. HostKey is how the visitor
+// verifies the host: it is the key sshd will present, and the visitor pins it.
+// The certificate check alone cannot do this job, because a certificate proves
+// the visitor's key was signed by the host's CA and says nothing about the
+// machine that answers.
 type VerifiedHost struct {
 	Registration protocol.HostRegistration
 	CAKey        ssh.PublicKey
+	HostKey      ssh.PublicKey
 }
 
 // VerifyHostRecord makes sure that a public host record was signed by the
@@ -65,7 +73,37 @@ func VerifyHostRecord(hostID string, rec protocol.HostPublicRecord) (VerifiedHos
 	if err != nil {
 		return VerifiedHost{}, err
 	}
-	return VerifiedHost{Registration: reg, CAKey: ca}, nil
+	// Checked here rather than at connect time, so that an unpinnable record
+	// fails before a single-use grant has been spent on it.
+	hostKey, err := protocol.ParseSSHPublicKey(reg.SSHHostPublicKey)
+	if err != nil {
+		return VerifiedHost{}, fmt.Errorf("%w: %v", ErrHostRecordNoKey, err)
+	}
+	return VerifiedHost{Registration: reg, CAKey: ca, HostKey: hostKey}, nil
+}
+
+// KnownHostsLine renders the verified host key for an OpenSSH known_hosts
+// file, keyed by host id rather than by address. That is what
+// `ssh -o HostKeyAlias=<host_id>` looks up, so the pin does not depend on how
+// the address is spelled, on the port, or on how the connection is carried.
+func KnownHostsLine(hostID string, host VerifiedHost) string {
+	return hostID + " " + host.Registration.SSHHostPublicKey + "\n"
+}
+
+// SSHOptions returns the OpenSSH options a visitor must connect with, given a
+// known_hosts file written from KnownHostsLine.
+//
+// Without these, ssh has no entry to compare against and stops to ask, which
+// for an agent with no terminal is a failure rather than a prompt. The reflex
+// fix, StrictHostKeyChecking=no, accepts whatever machine answers the address,
+// which is the substitution the signed record exists to prevent.
+func SSHOptions(hostID, knownHostsPath string) []string {
+	return []string{
+		"-o", "UserKnownHostsFile=" + knownHostsPath,
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "HostKeyAlias=" + hostID,
+		"-o", "HostKeyAlgorithms=ssh-ed25519",
+	}
 }
 
 // VerifyRedemption makes sure that a redemption response matches the verified

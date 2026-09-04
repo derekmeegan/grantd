@@ -72,22 +72,37 @@ export class TestHost {
     readonly identity: Identity,
     readonly hostId: string,
     readonly caLine: string,
+    /** This machine's sshd host key: what a visiting agent pins. */
+    readonly hostKeyLine: string,
   ) {}
 
   static async create(): Promise<TestHost> {
     const identity = await newIdentity();
     const ca = await newIdentity();
-    return new TestHost(identity, await deriveHostId(identity.publicKey), sshLine(ca.publicKey));
+    const hostKey = await newIdentity();
+    return new TestHost(
+      identity,
+      await deriveHostId(identity.publicKey),
+      sshLine(ca.publicKey),
+      sshLine(hostKey.publicKey),
+    );
   }
 
   async registrationBody(
-    overrides: Partial<{ hostname: string; ssh_port: number; ssh_user: string; timestamp: number }> = {},
+    overrides: Partial<{
+      hostname: string;
+      ssh_port: number;
+      ssh_user: string;
+      timestamp: number;
+      ssh_host_public_key: string;
+    }> = {},
   ): Promise<unknown> {
     const reg = {
       version: 1n,
       host_id: this.hostId,
       identity_public_key: this.identity.publicKey,
       ssh_ca_public_key: this.caLine,
+      ssh_host_public_key: overrides.ssh_host_public_key ?? this.hostKeyLine,
       hostname: overrides.hostname ?? "box.example.com",
       ssh_port: BigInt(overrides.ssh_port ?? 22),
       ssh_user: overrides.ssh_user ?? "ubuntu",
@@ -101,6 +116,7 @@ export class TestHost {
         host_id: reg.host_id,
         identity_public_key: b64uEncode(reg.identity_public_key),
         ssh_ca_public_key: reg.ssh_ca_public_key,
+        ssh_host_public_key: reg.ssh_host_public_key,
         hostname: reg.hostname,
         ssh_port: Number(reg.ssh_port),
         ssh_user: reg.ssh_user,

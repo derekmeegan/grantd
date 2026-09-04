@@ -31,12 +31,13 @@ type Store struct {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS host (
-    rowid_guard INTEGER PRIMARY KEY CHECK (rowid_guard = 1),
-    host_id     TEXT NOT NULL,
-    ssh_user    TEXT NOT NULL,
-    hostname    TEXT NOT NULL,
-    ssh_port    INTEGER NOT NULL,
-    created_at  INTEGER NOT NULL
+    rowid_guard         INTEGER PRIMARY KEY CHECK (rowid_guard = 1),
+    host_id             TEXT NOT NULL,
+    ssh_user            TEXT NOT NULL,
+    hostname            TEXT NOT NULL,
+    ssh_port            INTEGER NOT NULL,
+    created_at          INTEGER NOT NULL,
+    ssh_host_public_key TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS grants (
@@ -75,7 +76,7 @@ CREATE INDEX IF NOT EXISTS nonces_seen_at ON nonces (seen_at);
 
 // schemaVersion is stored in PRAGMA user_version. Bump it with every
 // migration in migrate.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // Open creates or opens the signer database, enforcing 0600 on the file.
 func Open(path string) (*Store, error) {
@@ -143,6 +144,15 @@ func migrate(db *sql.DB) error {
 		}
 		version = 2
 	}
+	if version < 3 {
+		// Version 3 publishes the sshd host key so a visitor can pin it. An
+		// enrolled machine gets the column empty; the signer refuses to
+		// publish a registration until init is re-run to fill it.
+		if _, err := tx.Exec(`ALTER TABLE host ADD COLUMN ssh_host_public_key TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+		version = 3
+	}
 	// Tables added after version 1 are created here for old databases too.
 	if _, err := tx.Exec(schema); err != nil {
 		return err
@@ -177,17 +187,23 @@ type Host struct {
 	Hostname  string
 	SSHPort   uint64
 	CreatedAt int64
+	// SSHHostPublicKey is this machine's sshd host key in authorized_keys
+	// form. Published in the signed registration for visitors to pin. Empty
+	// on a machine enrolled before host keys were published; re-run init.
+	SSHHostPublicKey string
 }
 
 // SetHost writes the enrollment record. There is exactly one row, ever.
 func (s *Store) SetHost(ctx context.Context, h Host) error {
 	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO host (rowid_guard, host_id, ssh_user, hostname, ssh_port, created_at)
-        VALUES (1, ?, ?, ?, ?, ?)
+        INSERT INTO host (rowid_guard, host_id, ssh_user, hostname, ssh_port, created_at,
+                          ssh_host_public_key)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(rowid_guard) DO UPDATE SET
             host_id=excluded.host_id, ssh_user=excluded.ssh_user,
-            hostname=excluded.hostname, ssh_port=excluded.ssh_port`,
-		h.HostID, h.SSHUser, h.Hostname, h.SSHPort, h.CreatedAt)
+            hostname=excluded.hostname, ssh_port=excluded.ssh_port,
+            ssh_host_public_key=excluded.ssh_host_public_key`,
+		h.HostID, h.SSHUser, h.Hostname, h.SSHPort, h.CreatedAt, h.SSHHostPublicKey)
 	return err
 }
 
@@ -195,8 +211,9 @@ func (s *Store) SetHost(ctx context.Context, h Host) error {
 func (s *Store) Host(ctx context.Context) (Host, error) {
 	var h Host
 	err := s.db.QueryRowContext(ctx,
-		`SELECT host_id, ssh_user, hostname, ssh_port, created_at FROM host WHERE rowid_guard = 1`).
-		Scan(&h.HostID, &h.SSHUser, &h.Hostname, &h.SSHPort, &h.CreatedAt)
+		`SELECT host_id, ssh_user, hostname, ssh_port, created_at, ssh_host_public_key
+           FROM host WHERE rowid_guard = 1`).
+		Scan(&h.HostID, &h.SSHUser, &h.Hostname, &h.SSHPort, &h.CreatedAt, &h.SSHHostPublicKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Host{}, ErrNoHost
 	}

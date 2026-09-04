@@ -87,7 +87,12 @@ func (s *Signer) SSHCAPublicKeyLine() (string, error) {
 // ------------------------------------------------------------------ enrollment
 
 // Enroll writes the local enrollment record. It rejects root.
-func (s *Signer) Enroll(ctx context.Context, sshUser, hostname string, port uint64) error {
+//
+// sshHostKeyLine is this machine's sshd host key. It is required: a record
+// without one gives a visitor nothing to pin, and a visitor that cannot pin is
+// one the coordination service can point at a machine of its own. Refusing it
+// here makes that record impossible to produce.
+func (s *Signer) Enroll(ctx context.Context, sshUser, hostname string, port uint64, sshHostKeyLine string) error {
 	if err := protocol.ValidateSSHUser(sshUser); err != nil {
 		return err
 	}
@@ -97,6 +102,14 @@ func (s *Signer) Enroll(ctx context.Context, sshUser, hostname string, port uint
 	if err := protocol.ValidatePort(port); err != nil {
 		return err
 	}
+	if sshHostKeyLine == "" {
+		return fmt.Errorf("signer: an ssh host public key is required to enroll")
+	}
+	// Parsed, not normalized: the exact bytes are what the registration signs
+	// and what a visitor pins. A comment or another key type is a rejection.
+	if _, err := protocol.ParseSSHPublicKey(sshHostKeyLine); err != nil {
+		return fmt.Errorf("signer: ssh host public key: %w", err)
+	}
 	hostID, err := s.HostID()
 	if err != nil {
 		return err
@@ -104,6 +117,7 @@ func (s *Signer) Enroll(ctx context.Context, sshUser, hostname string, port uint
 	return s.store.SetHost(ctx, store.Host{
 		HostID: hostID, SSHUser: sshUser, Hostname: hostname,
 		SSHPort: port, CreatedAt: s.now().Unix(),
+		SSHHostPublicKey: sshHostKeyLine,
 	})
 }
 
@@ -122,6 +136,14 @@ func (s *Signer) HostRegistration(ctx context.Context) (protocol.HostRegisterReq
 	if err != nil {
 		return protocol.HostRegisterRequest{}, err
 	}
+	// A registration without a host key would tell every visitor to connect
+	// to an address with nothing to verify the machine against. Refuse to
+	// produce one rather than publish a record that silently removes the
+	// visitor's only protection.
+	if h.SSHHostPublicKey == "" {
+		return protocol.HostRegisterRequest{}, fmt.Errorf(
+			"signer: this host has no ssh host key on record; re-run 'grant-signer init' to re-enroll")
+	}
 	nonce, err := protocol.NewNonce()
 	if err != nil {
 		return protocol.HostRegisterRequest{}, err
@@ -131,6 +153,7 @@ func (s *Signer) HostRegistration(ctx context.Context) (protocol.HostRegisterReq
 		HostID:            h.HostID,
 		IdentityPublicKey: s.IdentityPublicKey(),
 		SSHCAPublicKey:    caLine,
+		SSHHostPublicKey:  h.SSHHostPublicKey,
 		Hostname:          h.Hostname,
 		SSHPort:           h.SSHPort,
 		SSHUser:           h.SSHUser,

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -166,4 +167,98 @@ func decodeResponse(t *testing.T, body []byte) protocol.RedemptionResponse {
 		t.Fatalf("decode response: %v", err)
 	}
 	return resp
+}
+
+// TestVisitorPinsTheHostKey is the check the certificate cannot make. A
+// certificate proves the visitor's key was signed by the host's CA. It says
+// nothing about which machine answers the address. Only a pinned host key
+// does, and the service — which after DNS naming resolves the address — is
+// exactly the party that must not be able to move it.
+func TestVisitorPinsTheHostKey(t *testing.T) {
+	h := newHarness(t)
+	cap := h.mint(t, 1800)
+	real := realHostRecord(t, h)
+
+	host, err := agent.VerifyHostRecord(cap.HostID, real)
+	if err != nil {
+		t.Fatalf("real host record rejected: %v", err)
+	}
+	if host.HostKey == nil {
+		t.Fatal("verified host carries no host key to pin")
+	}
+	if string(host.HostKey.Marshal()) == string(host.CAKey.Marshal()) {
+		t.Fatal("host key and CA key are the same key")
+	}
+
+	line := agent.KnownHostsLine(cap.HostID, host)
+	if want := cap.HostID + " " + real.Registration.SSHHostPublicKey + "\n"; line != want {
+		t.Errorf("known_hosts line = %q, want %q", line, want)
+	}
+	opts := agent.SSHOptions(cap.HostID, "/tmp/kh")
+	joined := ""
+	for _, o := range opts {
+		joined += o + " "
+	}
+	for _, want := range []string{"StrictHostKeyChecking=yes", "HostKeyAlias=" + cap.HostID, "HostKeyAlgorithms=ssh-ed25519"} {
+		if !contains(joined, want) {
+			t.Errorf("ssh options lack %s: %s", want, joined)
+		}
+	}
+
+	t.Run("host key swapped under the real signature", func(t *testing.T) {
+		// The subtle attack: leave the address alone so nothing looks wrong,
+		// swap only the key the visitor is about to pin, and stand up a
+		// machine at that address holding the matching private key.
+		pub, _, err := idkey.Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		other, err := idkey.PublicSSHLine(pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forged := real
+		forged.Registration.SSHHostPublicKey = other
+		if _, err := agent.VerifyHostRecord(cap.HostID, forged); err == nil {
+			t.Fatal("accepted a record with a substituted host key")
+		}
+	})
+
+	t.Run("record with no host key at all", func(t *testing.T) {
+		// A service replaying a pre-amendment record. The signature would not
+		// verify anyway, but the failure must name the missing key when it
+		// does not, so the check is exercised on its own.
+		_, priv, err := idkey.Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub := priv.Public().(ed25519.PublicKey)
+		id, _ := protocol.HostID(pub)
+		forged := real
+		forged.HostID = id
+		forged.Registration.HostID = id
+		forged.Registration.IdentityPublicKey = pub
+		forged.Registration.SSHHostPublicKey = ""
+		msg, _ := forged.Registration.Canonical()
+		forged.Signature = ed25519.Sign(priv, msg)
+		_, err = agent.VerifyHostRecord(id, forged)
+		if err == nil {
+			t.Fatal("accepted a record with no host key")
+		}
+		if !errors.Is(err, agent.ErrHostRecordNoKey) {
+			t.Errorf("error = %v, want ErrHostRecordNoKey", err)
+		}
+	})
+}
+
+func contains(s, sub string) bool {
+	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
+}
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
 }

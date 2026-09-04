@@ -130,11 +130,35 @@ redeem visit "$URL" > "$WORK/result.json" 2>"$WORK/redeem.err" \
   && ok "redeemed with curl, openssl and ssh-keygen only" \
   || { bad "redeem failed"; tail -5 "$WORK/redeem.err"; }
 
+# Pinned against the known_hosts redeem.sh wrote from the signed record.
+# BatchMode forbids every prompt, so this passing means an agent with no
+# terminal can connect — the original bug — and StrictHostKeyChecking=yes
+# means the machine answering is the one the capability's host id vouches for.
+PIN="-o UserKnownHostsFile=/out/visit/known_hosts -o StrictHostKeyChecking=yes \
+     -o HostKeyAlias=$HOST_ID -o HostKeyAlgorithms=ssh-ed25519 -o BatchMode=yes"
+# shellcheck disable=SC2086
 SSH_OUT=$(docker exec "$VISITOR" ssh -i /out/visit/id_ed25519 \
-  -o CertificateFile=/out/visit/id_ed25519-cert.pub \
-  -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -o LogLevel=ERROR -o ConnectTimeout=10 -p 22 ubuntu@"$HOST_IP" 'whoami' 2>&1)
-[ "$SSH_OUT" = "ubuntu" ] && ok "logged in as ubuntu over real sshd" || bad "ssh login: $SSH_OUT"
+  -o CertificateFile=/out/visit/id_ed25519-cert.pub -o IdentitiesOnly=yes $PIN \
+  -o LogLevel=ERROR -o ConnectTimeout=10 -l ubuntu -p 22 -- "$HOST_IP" 'whoami' 2>&1)
+[ "$SSH_OUT" = "ubuntu" ] && ok "logged in as ubuntu over real sshd, host key pinned, no prompt" \
+  || bad "ssh login: $SSH_OUT"
+
+# The pin has to bite. Substitute a different valid host key and the
+# connection must be refused, or every check above is decoration.
+docker exec "$VISITOR" sh -c 'ssh-keygen -q -t ed25519 -N "" -f /tmp/wrong >/dev/null 2>&1 || true'
+docker exec "$VISITOR" sh -c \
+  "printf '%s %s\\n' '$HOST_ID' \"\$(cut -d' ' -f1,2 < /tmp/wrong.pub)\" > /tmp/wrong_known_hosts"
+WRONG_OUT=$(docker exec "$VISITOR" ssh -i /out/visit/id_ed25519 \
+  -o CertificateFile=/out/visit/id_ed25519-cert.pub -o IdentitiesOnly=yes \
+  -o UserKnownHostsFile=/tmp/wrong_known_hosts -o StrictHostKeyChecking=yes \
+  -o HostKeyAlias="$HOST_ID" -o HostKeyAlgorithms=ssh-ed25519 -o BatchMode=yes \
+  -o ConnectTimeout=10 -l ubuntu -p 22 -- "$HOST_IP" 'whoami' 2>&1 || true)
+case "$WRONG_OUT" in
+  ubuntu) bad "logged in despite a wrong pinned host key: the pin is not enforced" ;;
+  *"Host key verification failed"*|*"IDENTIFICATION HAS CHANGED"*|*"host key"*)
+    ok "a wrong pinned host key refuses the connection" ;;
+  *) bad "unexpected result with a wrong host key: $WRONG_OUT" ;;
+esac
 
 CERT=/out/visit/id_ed25519-cert.pub
 # The serial in the response must be the serial in the certificate. A JSON

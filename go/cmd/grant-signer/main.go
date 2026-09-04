@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +33,33 @@ const (
 	defaultOwnerSock  = "/run/grantd/owner/owner.sock"
 	defaultDaemonSock = "/run/grantd/redeem/redeem.sock"
 )
+
+// defaultHostKeyFile is where OpenSSH keeps the public half of the ed25519
+// host key on every distribution grantd supports. It is world-readable.
+const defaultHostKeyFile = "/etc/ssh/ssh_host_ed25519_key.pub"
+
+// readSSHHostKey loads this machine's sshd host key and reduces it to the exact
+// two-field form the protocol signs. The file usually carries a third field,
+// a comment, which is not part of the key and would change the signed bytes,
+// so it is dropped. Everything else is validated by the signer.
+func readSSHHostKey(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading the ssh host key at %s: %w\n"+
+			"  grantd publishes this key so a visiting agent can verify the machine it reaches.\n"+
+			"  Generate host keys with 'ssh-keygen -A' as root, or pass --ssh-host-key-file.", path, err)
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) < 2 {
+		return "", fmt.Errorf("%s does not look like an ssh public key", path)
+	}
+	line := fields[0] + " " + fields[1]
+	if _, err := protocol.ParseSSHPublicKey(line); err != nil {
+		return "", fmt.Errorf("the ssh host key at %s is not usable: %w\n"+
+			"  grantd v1 pins a single ssh-ed25519 host key.", path, err)
+	}
+	return line, nil
+}
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -66,6 +94,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `grant-signer — grantd local trust root
 
   grant-signer init    --ssh-user U (--hostname H | --dns-suffix D) [--port 22] [--origin URL]
+                       [--ssh-host-key-file /etc/ssh/ssh_host_ed25519_key.pub]
   grant-signer serve   [--owner-uid N] [--daemon-uid N]
   grant-signer status
   grant-signer destroy --yes
@@ -143,6 +172,9 @@ func cmdInit(args []string, log *slog.Logger) error {
 	hostname := fs.String("hostname", "", "address a visiting agent will SSH to")
 	dnsSuffix := fs.String("dns-suffix", "", "let the service name this host under a suffix it manages, e.g. hosts.grantd.dev")
 	port := fs.Uint64("port", 22, "SSH port")
+	hostKeyFile := fs.String("ssh-host-key-file",
+		envOr("GRANTD_SSH_HOST_KEY_FILE", defaultHostKeyFile),
+		"public half of this machine's sshd ed25519 host key, published for visitors to pin")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -162,6 +194,10 @@ func cmdInit(args []string, log *slog.Logger) error {
 		if err := protocol.ValidateDNSSuffix(*dnsSuffix); err != nil {
 			return err
 		}
+	}
+	hostKeyLine, err := readSSHHostKey(*hostKeyFile)
+	if err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(p.keyDir, idkey.KeyDirMode); err != nil {
@@ -210,7 +246,7 @@ func cmdInit(args []string, log *slog.Logger) error {
 	}
 
 	ctx := context.Background()
-	if err := s.Enroll(ctx, *sshUser, enrollHostname, *port); err != nil {
+	if err := s.Enroll(ctx, *sshUser, enrollHostname, *port, hostKeyLine); err != nil {
 		return err
 	}
 	caLine, err := s.SSHCAPublicKeyLine()
@@ -218,12 +254,13 @@ func cmdInit(args []string, log *slog.Logger) error {
 		return err
 	}
 	out, _ := json.MarshalIndent(map[string]any{
-		"host_id":           hostID,
-		"ssh_user":          *sshUser,
-		"hostname":          enrollHostname,
-		"ssh_port":          *port,
-		"ssh_ca_public_key": caLine,
-		"state":             p.state,
+		"host_id":             hostID,
+		"ssh_user":            *sshUser,
+		"hostname":            enrollHostname,
+		"ssh_port":            *port,
+		"ssh_ca_public_key":   caLine,
+		"ssh_host_public_key": hostKeyLine,
+		"state":               p.state,
 	}, "", "  ")
 	fmt.Println(string(out))
 	return nil
@@ -392,12 +429,13 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	out, _ := json.MarshalIndent(map[string]any{
-		"host_id":  h.HostID,
-		"ssh_user": h.SSHUser,
-		"hostname": h.Hostname,
-		"ssh_port": h.SSHPort,
-		"origin":   p.origin,
-		"grants":   grants,
+		"host_id":             h.HostID,
+		"ssh_user":            h.SSHUser,
+		"hostname":            h.Hostname,
+		"ssh_port":            h.SSHPort,
+		"ssh_host_public_key": h.SSHHostPublicKey,
+		"origin":              p.origin,
+		"grants":              grants,
 	}, "", "  ")
 	fmt.Println(string(out))
 	return nil

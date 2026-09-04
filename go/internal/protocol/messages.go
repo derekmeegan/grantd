@@ -42,11 +42,17 @@ type HostRegistration struct {
 	HostID            string `json:"host_id"`
 	IdentityPublicKey []byte `json:"identity_public_key"`
 	SSHCAPublicKey    string `json:"ssh_ca_public_key"`
-	Hostname          string `json:"hostname"`
-	SSHPort           uint64 `json:"ssh_port"`
-	SSHUser           string `json:"ssh_user"`
-	Timestamp         int64  `json:"timestamp"`
-	Nonce             []byte `json:"nonce"`
+	// SSHHostPublicKey is the sshd host key a visiting agent must see when it
+	// connects. ssh_ca_public_key is how the host verifies the visitor; this is
+	// how the visitor verifies the host. Without it the service can point a
+	// signed hostname at a machine of its own, and a signature over the name
+	// is worth nothing to the party doing the resolving.
+	SSHHostPublicKey string `json:"ssh_host_public_key"`
+	Hostname         string `json:"hostname"`
+	SSHPort          uint64 `json:"ssh_port"`
+	SSHUser          string `json:"ssh_user"`
+	Timestamp        int64  `json:"timestamp"`
+	Nonce            []byte `json:"nonce"`
 }
 
 func (m *HostRegistration) Canonical() ([]byte, error) {
@@ -59,6 +65,7 @@ func (m *HostRegistration) Canonical() ([]byte, error) {
 		canonical.S("host_id", m.HostID),
 		canonical.B("identity_public_key", m.IdentityPublicKey),
 		canonical.S("ssh_ca_public_key", m.SSHCAPublicKey),
+		canonical.S("ssh_host_public_key", m.SSHHostPublicKey),
 		canonical.S("hostname", m.Hostname),
 		canonical.U("ssh_port", m.SSHPort),
 		canonical.S("ssh_user", m.SSHUser),
@@ -271,6 +278,7 @@ type hostRegistrationJSON struct {
 	HostID            string `json:"host_id"`
 	IdentityPublicKey string `json:"identity_public_key"`
 	SSHCAPublicKey    string `json:"ssh_ca_public_key"`
+	SSHHostPublicKey  string `json:"ssh_host_public_key"`
 	Hostname          string `json:"hostname"`
 	SSHPort           uint64 `json:"ssh_port"`
 	SSHUser           string `json:"ssh_user"`
@@ -282,7 +290,7 @@ func (m HostRegistration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(hostRegistrationJSON{
 		Version: m.Version, HostID: m.HostID,
 		IdentityPublicKey: b64enc(m.IdentityPublicKey),
-		SSHCAPublicKey:    m.SSHCAPublicKey, Hostname: m.Hostname,
+		SSHCAPublicKey:    m.SSHCAPublicKey, SSHHostPublicKey: m.SSHHostPublicKey, Hostname: m.Hostname,
 		SSHPort: m.SSHPort, SSHUser: m.SSHUser,
 		Timestamp: m.Timestamp, Nonce: b64enc(m.Nonce),
 	})
@@ -303,7 +311,7 @@ func (m *HostRegistration) UnmarshalJSON(data []byte) error {
 	}
 	*m = HostRegistration{
 		Version: j.Version, HostID: j.HostID, IdentityPublicKey: pk,
-		SSHCAPublicKey: j.SSHCAPublicKey, Hostname: j.Hostname,
+		SSHCAPublicKey: j.SSHCAPublicKey, SSHHostPublicKey: j.SSHHostPublicKey, Hostname: j.Hostname,
 		SSHPort: j.SSHPort, SSHUser: j.SSHUser,
 		Timestamp: j.Timestamp, Nonce: nonce,
 	}

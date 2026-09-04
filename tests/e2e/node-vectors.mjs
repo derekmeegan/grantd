@@ -37,6 +37,7 @@ const shape = {
     c.fU64("version", m.version), c.fString("host_id", m.host_id),
     c.fBytes("identity_public_key", raw(m.identity_public_key)),
     c.fString("ssh_ca_public_key", m.ssh_ca_public_key),
+    c.fString("ssh_host_public_key", m.ssh_host_public_key),
     c.fString("hostname", m.hostname), c.fU64("ssh_port", m.ssh_port),
     c.fString("ssh_user", m.ssh_user), c.fU64("timestamp", m.timestamp),
     c.fBytes("nonce", raw(m.nonce)),

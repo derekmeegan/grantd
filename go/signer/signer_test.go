@@ -17,6 +17,48 @@ import (
 
 const testOrigin = "https://grantd.test"
 
+// newHostKeyLine returns a fresh ssh-ed25519 authorized_keys line, standing in
+// for the machine's sshd host key.
+func newHostKeyLine(t *testing.T) string {
+	t.Helper()
+	pub, _, err := idkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := idkey.PublicSSHLine(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return line
+}
+
+// newBareSigner opens a signer without enrolling it, so that enrollment
+// itself can be the thing under test.
+func newBareSigner(t *testing.T) *signer.Signer {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"host_identity", "ssh_ca"} {
+		_, priv, err := idkey.Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := idkey.SavePrivate(filepath.Join(dir, name), priv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := signer.Open(signer.Config{
+		HostIdentityKeyPath: filepath.Join(dir, "host_identity"),
+		SSHCAKeyPath:        filepath.Join(dir, "ssh_ca"),
+		StatePath:           filepath.Join(dir, "state.db"),
+		Origin:              testOrigin,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
 // newSigner builds an enrolled signer on a temporary directory. The tests use
 // the production code paths, except where one simulates a compromised part.
 func newSigner(t *testing.T) *signer.Signer {
@@ -41,7 +83,7 @@ func newSigner(t *testing.T) *signer.Signer {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	if err := s.Enroll(context.Background(), "ubuntu", "box.example.com", 22); err != nil {
+	if err := s.Enroll(context.Background(), "ubuntu", "box.example.com", 22, newHostKeyLine(t)); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -382,7 +424,7 @@ func TestRedeemRejections(t *testing.T) {
 
 	t.Run("root is never enrollable", func(t *testing.T) {
 		s := newSigner(t)
-		if err := s.Enroll(ctx, "root", "box.example.com", 22); err == nil {
+		if err := s.Enroll(ctx, "root", "box.example.com", 22, newHostKeyLine(t)); err == nil {
 			t.Fatal("root enrollment was accepted")
 		}
 	})
@@ -524,5 +566,101 @@ func TestConcurrentRedemptionsProduceExactlyOneWinner(t *testing.T) {
 	}
 	if certs != 1 {
 		t.Errorf("certificates issued = %d, want 1", certs)
+	}
+}
+
+// TestEnrollmentRequiresAUsableHostKey pins the guard that makes a visitor's
+// verification possible at all. A machine that could enroll without a host
+// key would publish a record that silently leaves every visitor with nothing
+// to check, so it is refused at enrollment rather than found out later.
+func TestEnrollmentRequiresAUsableHostKey(t *testing.T) {
+	ctx := context.Background()
+	good := newHostKeyLine(t)
+	for _, tc := range []struct{ name, line string }{
+		{"empty", ""},
+		{"with a comment", good + " root@box"},
+		{"trailing whitespace", good + " "},
+		{"not ed25519", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7"},
+		{"not a key at all", "hello world"},
+		{"only a type", "ssh-ed25519"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := newBareSigner(t).Enroll(ctx, "ubuntu", "box.example.com", 22, tc.line); err == nil {
+				t.Fatalf("enrolled with host key %q, which must be refused", tc.line)
+			}
+		})
+	}
+	t.Run("a clean two-field line is accepted and stored", func(t *testing.T) {
+		s := newBareSigner(t)
+		if err := s.Enroll(ctx, "ubuntu", "box.example.com", 22, good); err != nil {
+			t.Fatalf("a valid host key was refused: %v", err)
+		}
+		h, err := s.Host(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.SSHHostPublicKey != good {
+			t.Errorf("stored host key = %q, want %q", h.SSHHostPublicKey, good)
+		}
+	})
+}
+
+// TestRegistrationCarriesTheHostKeyAndVerifies is the visitor's chain checked
+// from the host's end: the published record must verify under the identity
+// key its host_id derives from, and must carry a host key that is not the CA.
+func TestRegistrationCarriesTheHostKeyAndVerifies(t *testing.T) {
+	s := newSigner(t)
+	reg, err := s.HostRegistration(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.Registration.SSHHostPublicKey == "" {
+		t.Fatal("the published registration carries no ssh host key")
+	}
+	if _, err := protocol.ParseSSHPublicKey(reg.Registration.SSHHostPublicKey); err != nil {
+		t.Errorf("published host key does not parse: %v", err)
+	}
+	if reg.Registration.SSHHostPublicKey == reg.Registration.SSHCAPublicKey {
+		t.Error("the ssh host key and the ssh CA key are the same key")
+	}
+	if err := protocol.CheckHostID(reg.Registration.HostID, reg.Registration.IdentityPublicKey); err != nil {
+		t.Errorf("host_id does not match the identity key: %v", err)
+	}
+	msg, err := reg.Registration.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !protocol.Verify(reg.Registration.IdentityPublicKey, msg, reg.Signature) {
+		t.Fatal("the host's own registration signature does not verify")
+	}
+	// Swapping the host key must break the signature: this is what stops a
+	// coordination service substituting a machine it controls.
+	tampered := reg.Registration
+	tampered.SSHHostPublicKey = newHostKeyLine(t)
+	tmsg, _ := tampered.Canonical()
+	if protocol.Verify(tampered.IdentityPublicKey, tmsg, reg.Signature) {
+		t.Fatal("a registration with a swapped host key still verified")
+	}
+}
+
+// TestRegistrationRefusesToPublishWithoutAHostKey covers a machine enrolled
+// before host keys were published: the migrated row is empty, and the signer
+// must refuse to publish rather than emit an unpinnable record.
+func TestRegistrationRefusesToPublishWithoutAHostKey(t *testing.T) {
+	s := newBareSigner(t)
+	ctx := context.Background()
+	if err := s.Enroll(ctx, "ubuntu", "box.example.com", 22, newHostKeyLine(t)); err != nil {
+		t.Fatal(err)
+	}
+	h, err := s.Host(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.SSHHostPublicKey = ""
+	if err := s.Store().SetHost(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HostRegistration(ctx); err == nil {
+		t.Fatal("published a registration with no ssh host key")
 	}
 }

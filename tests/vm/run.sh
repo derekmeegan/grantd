@@ -125,9 +125,12 @@ redeem() { # redeem OUTDIR URL
   owner "rm -rf $1 && GRANTD_IDENTITY=$1/id.pem sh /opt/grantd-install/redeem.sh --out $1 '$2'"
 }
 ssh_as_visitor() { # ssh_as_visitor OUTDIR COMMAND
+  # Pinned against the known_hosts redeem.sh wrote, keyed by host id.
+  # BatchMode makes a missing or wrong pin a failure rather than a prompt.
   owner "ssh -i $1/id_ed25519 -o CertificateFile=$1/id_ed25519-cert.pub \
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR -o ConnectTimeout=10 $SSH_USER@127.0.0.1 '$2'"
+    -o IdentitiesOnly=yes -o UserKnownHostsFile=$1/known_hosts \
+    -o StrictHostKeyChecking=yes -o HostKeyAlias=$HOST_ID -o HostKeyAlgorithms=ssh-ed25519 \
+    -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=10 -l $SSH_USER -- 127.0.0.1 '$2'"
 }
 
 step "a capability becomes an SSH session"
@@ -240,16 +243,21 @@ vm "sudo iptables -D OUTPUT -p tcp --dport 443 -j REJECT 2>/dev/null || true"
 
 step "uninstalling"
 vm 'sudo cp /tmp/v4/id_ed25519 /tmp/keep_key && sudo cp /tmp/v4/id_ed25519-cert.pub /tmp/keep_cert.pub \
-    && sudo chown $(id -un) /tmp/keep_key /tmp/keep_cert.pub && sudo chmod 600 /tmp/keep_key' 2>/dev/null || true
+    && sudo cp /tmp/v4/known_hosts /tmp/keep_known_hosts \
+    && sudo chown $(id -un) /tmp/keep_key /tmp/keep_cert.pub /tmp/keep_known_hosts \
+    && sudo chmod 600 /tmp/keep_key' 2>/dev/null || true
 vm 'sudo /opt/grantd-install/uninstall.sh --yes' >/tmp/vm-uninstall.log 2>&1 \
   && ok "uninstaller completed" || { bad "uninstall failed"; tail -10 /tmp/vm-uninstall.log; }
 
 vm 'true' && ok "SSH still works after the uninstall" || bad "uninstall broke SSH"
 vm 'sudo sshd -t' && ok "sshd -t passes after uninstall" || bad "sshd -t fails after uninstall"
 vm 'test ! -e /etc/grantd/ssh_ca' && ok "SSH CA private key destroyed" || bad "CA key remains"
+# Still pinned: the uninstall destroys the CA, not the host key, so this must
+# fail on the certificate and not on the pin.
 vm "ssh -i /tmp/keep_key -o CertificateFile=/tmp/keep_cert.pub -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes \
-    -o ConnectTimeout=5 -o LogLevel=ERROR $SSH_USER@127.0.0.1 whoami" >/dev/null 2>&1 \
+    -o UserKnownHostsFile=/tmp/keep_known_hosts -o StrictHostKeyChecking=yes \
+    -o HostKeyAlias=$HOST_ID -o HostKeyAlgorithms=ssh-ed25519 -o BatchMode=yes \
+    -o ConnectTimeout=5 -o LogLevel=ERROR -l $SSH_USER -- 127.0.0.1 whoami" >/dev/null 2>&1 \
   && bad "a certificate issued before uninstall still authenticates" \
   || ok "certificates issued before uninstall no longer authenticate"
 

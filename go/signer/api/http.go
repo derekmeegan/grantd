@@ -182,6 +182,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"hostname":                h.Hostname,
 		"ssh_port":                h.SSHPort,
 		"ssh_ca_public_key":       caLine,
+		"ssh_host_public_key":     h.SSHHostPublicKey,
 		"active_grants":           active,
 		"certificates_issued":     certs,
 		"protocol_version":        protocol.Version,

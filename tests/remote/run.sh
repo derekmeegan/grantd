@@ -191,9 +191,10 @@ if ! (exec 3<>/dev/tcp/"$GOT_HOST"/22) 2>/dev/null; then
   echo "     --advertise ADDRESS if the one derived from SSH_CONNECTION is wrong." >&2
 else
 SSH_OUT="$(ssh -i "$OUT/id_ed25519" -o CertificateFile="$OUT/id_ed25519-cert.pub" \
-  -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -o LogLevel=ERROR -o ConnectTimeout=20 -o PreferredAuthentications=publickey \
-  "$SSH_USER@$GOT_HOST" 'echo "$(whoami)@$(hostname)"' 2>&1 | tr -d '\r')"
+  -o IdentitiesOnly=yes -o UserKnownHostsFile="$OUT/known_hosts" \
+  -o StrictHostKeyChecking=yes -o HostKeyAlias="$HOST_ID" -o HostKeyAlgorithms=ssh-ed25519 \
+  -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=20 -o PreferredAuthentications=publickey \
+  -l "$SSH_USER" -- "$GOT_HOST" 'echo "$(whoami)@$(hostname)"' 2>&1 | tr -d '\r')"
 case "$SSH_OUT" in
   "$SSH_USER"@*) ok "logged in across the network as $SSH_OUT" ;;
   *) bad "ssh failed: $SSH_OUT" ;;
@@ -203,8 +204,9 @@ fi
 # Cloudflare routed the grant and is now absent from the path.
 if [ "$FAIL" -eq 0 ] && [ -n "${SSH_OUT:-}" ]; then
   SSH_OUT2="$(ssh -i "$OUT/id_ed25519" -o CertificateFile="$OUT/id_ed25519-cert.pub" \
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR -o ConnectTimeout=20 "$SSH_USER@$GOT_HOST" \
+    -o IdentitiesOnly=yes -o UserKnownHostsFile="$OUT/known_hosts" \
+    -o StrictHostKeyChecking=yes -o HostKeyAlias="$HOST_ID" -o HostKeyAlgorithms=ssh-ed25519 \
+    -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=20 -l "$SSH_USER" -- "$GOT_HOST" \
     'ss -tnp 2>/dev/null | grep -c ESTAB || true' 2>&1 | tr -d '\r\n')"
   ok "session is a direct TCP connection to the host ($SSH_OUT2 established sockets there)"
 fi
@@ -228,10 +230,13 @@ else
   rsh true && ok "SSH to the host still works after uninstall" || bad "uninstall broke SSH"
   rsudo 'sshd -t' && ok "sshd -t passes after uninstall" || bad "sshd -t fails after uninstall"
 
+  # Still pinned: the uninstall removes the CA, not the host key, so this must
+  # fail on the certificate rather than on the pin.
   ssh -i "$OUT/id_ed25519" -o CertificateFile="$OUT/id_ed25519-cert.pub" \
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes -o UserKnownHostsFile="$OUT/known_hosts" \
+    -o StrictHostKeyChecking=yes -o HostKeyAlias="$HOST_ID" -o HostKeyAlgorithms=ssh-ed25519 \
     -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=15 \
-    "$SSH_USER@$GOT_HOST" true >/dev/null 2>&1 \
+    -l "$SSH_USER" -- "$GOT_HOST" true >/dev/null 2>&1 \
     && bad "a certificate issued before uninstall still authenticates" \
     || ok "certificates issued before uninstall no longer authenticate"
   rsudo "rm -rf /opt/grantd-install" >/dev/null 2>&1 || true

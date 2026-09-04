@@ -291,16 +291,17 @@ if [ -n "$URL" ]; then
     >/tmp/redeem.log 2>&1 \
     && ok "redeemed with curl, openssl and ssh-keygen only" \
     || { bad "redeem failed"; tail -5 /tmp/redeem.log; }
-  OUT=$(duser 'ssh -i /tmp/visit/id_ed25519 -o CertificateFile=/tmp/visit/id_ed25519-cert.pub \
-        -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o LogLevel=ERROR ubuntu@127.0.0.1 whoami' 2>&1 | tr -d '[:space:]')
+  OUT=$(duser "ssh -i /tmp/visit/id_ed25519 -o CertificateFile=/tmp/visit/id_ed25519-cert.pub \
+        -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/visit/known_hosts \
+        -o StrictHostKeyChecking=yes -o HostKeyAlias=$HOST_ID -o HostKeyAlgorithms=ssh-ed25519 \
+        -o BatchMode=yes -o LogLevel=ERROR -l ubuntu -- 127.0.0.1 whoami" 2>&1 | tr -d '[:space:]')
   [ "$OUT" = "ubuntu" ] && ok "SSH login with the issued certificate" || bad "ssh failed: $OUT"
 fi
 
 # ----------------------------------------------------------------- uninstall
 
 step "uninstalling"
-dsh 'cp /tmp/visit/id_ed25519 /root/leftover_key && cp /tmp/visit/id_ed25519-cert.pub /root/leftover_cert.pub && chmod 600 /root/leftover_key' 2>/dev/null || true
+dsh 'cp /tmp/visit/id_ed25519 /root/leftover_key && cp /tmp/visit/id_ed25519-cert.pub /root/leftover_cert.pub && cp /tmp/visit/known_hosts /root/leftover_known_hosts && chmod 600 /root/leftover_key' 2>/dev/null || true
 if dsh '/opt/grantd-install/uninstall.sh --yes' >/tmp/uninstall.log 2>&1; then
   ok "uninstaller completed"
 else
@@ -318,9 +319,13 @@ dsh 'systemctl is-active grantd.service >/dev/null 2>&1' && bad "grantd.service 
 
 # A certificate issued before the uninstall must stop working. The trust path
 # it depends on is gone.
-if dsh 'ssh -i /root/leftover_key -o CertificateFile=/root/leftover_cert.pub \
-      -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=5 ubuntu@127.0.0.1 whoami' >/dev/null 2>&1; then
+# Still pinned, with the known_hosts from the successful login: the uninstall
+# destroys the CA, not the host key, so this must fail on the certificate and
+# not on the pin, or it passes for the wrong reason.
+if dsh "ssh -i /root/leftover_key -o CertificateFile=/root/leftover_cert.pub \
+      -o IdentitiesOnly=yes -o UserKnownHostsFile=/root/leftover_known_hosts \
+      -o StrictHostKeyChecking=yes -o HostKeyAlias=$HOST_ID -o HostKeyAlgorithms=ssh-ed25519 \
+      -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=5 -l ubuntu -- 127.0.0.1 whoami" >/dev/null 2>&1; then
   bad "a certificate issued before uninstall still authenticates"
 else
   ok "certificates issued before uninstall no longer authenticate"
