@@ -2,7 +2,7 @@ package protocol
 
 import "net/http"
 
-// Error codes (protocol/v1.md §10). Clients branch on these strings; they are
+// Error codes (docs/whitepaper.md §9). Clients branch on these strings; they are
 // part of the frozen protocol and must not be renamed.
 const (
 	ErrCodeBadRequest         = "BAD_REQUEST"

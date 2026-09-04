@@ -5,7 +5,7 @@
 # Containers cannot test three claims that matter most on a machine you
 # cannot walk over to:
 #
-#   1. Reboot. protocol/v1.md §12 says signer state survives, the daemon
+#   1. Reboot. docs/whitepaper.md §13 says signer state survives, the daemon
 #      reconnects, and unexpired grants stay redeemable.
 #   2. The systemd sandbox without --privileged. The units are written for a
 #      normal machine, not a privileged container.

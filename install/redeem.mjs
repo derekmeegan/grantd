@@ -52,7 +52,7 @@ const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); r
 // lp prefixes a byte string with its 32 bit big endian length.
 const lp = (b) => Buffer.concat([u32(b.length), Buffer.from(b)]);
 
-// Canonical Binary Encoding, protocol/v1.md section 1:
+// Canonical Binary Encoding, docs/whitepaper.md §5.1:
 //   CBE(context, fields) = LP(utf8(context)) || u32be(count)
 //                          || for each: LP(utf8(name)) || tag || LP(value)
 const TAG_STRING = 0x01, TAG_U64 = 0x02, TAG_BYTES = 0x03;
@@ -155,7 +155,7 @@ function openSshPrivateKey(rawSeed32, rawPub, comment = "") {
 }
 
 // parseCertificate reads an ssh-ed25519 user certificate and verifies the CA
-// signature over it. protocol/v1.md section 9 lists the fields grantd sets.
+// signature over it. docs/whitepaper.md §8 lists the fields grantd sets.
 function parseCertificate(line) {
   const parts = line.trim().split(" ");
   if (parts.length !== 2 || parts[0] !== "ssh-ed25519-cert-v01@openssh.com") {

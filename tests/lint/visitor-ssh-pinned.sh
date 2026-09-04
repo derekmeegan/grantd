@@ -22,7 +22,7 @@ set -eu
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO"
 
-TARGETS="tests install .github cloudflare/src/routes/docs.ts README.md protocol/v1.md"
+TARGETS="tests install .github cloudflare/src/routes/docs.ts README.md docs/whitepaper.md"
 
 fail=0
 report() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }

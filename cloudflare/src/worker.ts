@@ -17,6 +17,7 @@ import { docsMarkdown, grantInstructions } from "./routes/docs";
 import redeemScript from "../../install/redeem.sh";
 import installScriptFile from "../../install/install.sh";
 import reapSessionsScript from "../../install/reap-sessions.sh";
+import whitepaper from "../../docs/whitepaper.md";
 import redeemNodeScript from "../../install/redeem.mjs";
 import bridgeProxyScript from "../../install/bridge-proxy.py";
 import type { Env, RateLimiter } from "./env";
@@ -48,6 +49,11 @@ async function route(request: Request, env: Env): Promise<Response> {
   // lands on a service path here is sent there rather than shown a 404 —
   // capability URLs are minted against PUBLIC_ORIGIN and should already point
   // at api., but a hand-edited one should still work.
+  // The whitepaper is served on every hostname: it is documentation, not the
+  // protocol, so there is no reason to send an apex reader to api. for it.
+  if (request.method === "GET" && seg.length === 1 && seg[0] === "whitepaper") {
+    return textResponse(whitepaper, 200, "text/markdown; charset=utf-8");
+  }
   if (SITE_HOSTS.has(url.hostname)) {
     if (request.method === "GET" && seg.length === 0) {
       return textResponse(docsMarkdown(origin), 200, "text/markdown; charset=utf-8");

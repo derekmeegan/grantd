@@ -3,7 +3,7 @@
  *
  * The Go implementation produced these fixtures. The TypeScript one checks
  * them here. Neither implementation is the reference. Both are written from
- * protocol/v1.md and both must reproduce the same bytes.
+ * docs/whitepaper.md and both must reproduce the same bytes.
  */
 
 import { describe, expect, it } from "vitest";

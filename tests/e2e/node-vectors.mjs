@@ -30,7 +30,7 @@ const byName = Object.fromEntries(V.vectors.map((v) => [v.name, v]));
 const hex = (b) => Buffer.from(b).toString("hex");
 const raw = (b64) => c.unb64u(b64);
 
-// Each message's field list, in the order protocol/v1.md declares it. The
+// Each message's field list, in the order docs/whitepaper.md declares it. The
 // order is part of the encoding, so it is written out rather than derived.
 const shape = {
   host_register: (m) => [

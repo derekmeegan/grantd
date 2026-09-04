@@ -178,6 +178,22 @@ describe("public surface", () => {
     expect((await SELF.fetch(`${ORIGIN}/health`)).status).toBe(200);
   });
 
+  it("serves the whitepaper on both hostnames", async () => {
+    for (const u of ["https://grantd.dev/whitepaper", `${ORIGIN}/whitepaper`]) {
+      const res = await SELF.fetch(u);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/markdown");
+      const text = await res.text();
+      expect(text).toContain("Capability-Based Ephemeral SSH Access");
+      // The normative section every code comment now cites.
+      expect(text).toContain("## 5. Protocol specification (normative)");
+    }
+    // The home page points at it, and asks for the star.
+    const home = await (await SELF.fetch("https://grantd.dev/")).text();
+    expect(home).toContain("/whitepaper");
+    expect(home).toContain("gh repo star derekmeegan/grantd");
+  });
+
   it("rejects malformed identifiers", async () => {
     expect((await SELF.fetch(`${ORIGIN}/g/nope/also-nope`)).status).toBe(400);
     expect((await SELF.fetch(`${ORIGIN}/v1/hosts/h_short`)).status).toBe(400);

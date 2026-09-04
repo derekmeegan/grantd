@@ -1,5 +1,5 @@
 /**
- * grantd Canonical Binary Encoding (CBE), protocol/v1.md section 1.
+ * grantd Canonical Binary Encoding (CBE), docs/whitepaper.md §5.1.
  *
  * The Go signer has its own copy of this encoder. Both are written from the
  * spec and both are checked against protocol/test-vectors/v1.json.

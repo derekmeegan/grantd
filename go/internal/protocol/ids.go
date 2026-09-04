@@ -1,5 +1,5 @@
 // Package protocol implements the grantd v1 wire protocol: identifiers,
-// canonical messages, and the JSON envelopes that carry them. protocol/v1.md
+// canonical messages, and the JSON envelopes that carry them. docs/whitepaper.md
 // defines every byte, and protocol/test-vectors/ is the conformance suite.
 package protocol
 
@@ -17,13 +17,13 @@ import (
 // Version is the only protocol version this implementation speaks.
 const Version uint64 = 1
 
-// Clock skew windows, in seconds (protocol/v1.md §2).
+// Clock skew windows, in seconds (docs/whitepaper.md §5.2).
 const (
 	SkewRegistration int64 = 300
 	SkewRedemption   int64 = 120
 )
 
-// Grant duration bounds (protocol/v1.md §4.3).
+// Grant duration bounds (docs/whitepaper.md §5.4.3).
 const (
 	MinGrantTTLSeconds int64 = 60
 	MaxGrantTTLSeconds int64 = 8 * 3600

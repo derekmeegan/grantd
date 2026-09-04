@@ -1,5 +1,5 @@
 // Package canonical implements Canonical Binary Encoding (CBE) as specified
-// in protocol/v1.md section 1. A message is a flat, ordered list of typed,
+// in docs/whitepaper.md §5.1. A message is a flat, ordered list of typed,
 // named fields under a domain separation string. There is no key ordering,
 // escaping, or number formatting to get wrong.
 package canonical
@@ -35,7 +35,7 @@ var (
 )
 
 // Field is one named, typed element of a message. Fields are encoded in slice
-// order, which must match protocol/v1.md.
+// order, which must match docs/whitepaper.md.
 type Field struct {
 	Name string
 	Tag  byte

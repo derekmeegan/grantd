@@ -16,7 +16,7 @@
   ],
   // The reference redeemer is served from the single copy in install/, so the
   // script agents download is always the one the test suite exercises.
-  "rules": [{ "type": "Text", "globs": ["**/*.sh", "**/*.py", "**/*.html", "**/redeem.mjs"] }],
+  "rules": [{ "type": "Text", "globs": ["**/*.sh", "**/*.py", "**/whitepaper.md", "**/redeem.mjs"] }],
   "vars": {
     // The service's own name. Capability URLs are minted against this, so
     // changing it invalidates every URL already handed out and needs

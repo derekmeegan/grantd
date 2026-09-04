@@ -13,7 +13,7 @@ declare module "*.py" {
   export default contents;
 }
 
-declare module "*.html" {
+declare module "*.md" {
   const contents: string;
   export default contents;
 }

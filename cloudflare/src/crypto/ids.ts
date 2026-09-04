@@ -1,4 +1,4 @@
-/** Identifier derivation and Ed25519 verification, protocol/v1.md section 3. */
+/** Identifier derivation and Ed25519 verification, docs/whitepaper.md §5.3. */
 
 import { base32Encode } from "./encoding";
 

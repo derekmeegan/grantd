@@ -3,7 +3,7 @@
 **Let agents securely share their machines.**
 
 [![ci](https://github.com/derekmeegan/grantd/actions/workflows/ci.yml/badge.svg)](https://github.com/derekmeegan/grantd/actions/workflows/ci.yml)
-[![protocol](https://img.shields.io/badge/protocol-v1%20frozen-blue)](protocol/v1.md)
+[![protocol](https://img.shields.io/badge/protocol-v1%20frozen-blue)](docs/whitepaper.md) [![whitepaper](https://img.shields.io/badge/whitepaper-grantd.dev-green)](https://grantd.dev/whitepaper)
 [![platform](https://img.shields.io/badge/platform-linux%20%C2%B7%20openssh-lightgrey)](#requirements)
 
 An agent working on a Linux box can hand another agent a shell on it — with no
@@ -249,7 +249,7 @@ curl https://api.grantd.dev/g/<host_id>/<grant_id>
 You get the exact requests to make, in plain text. There is no SDK, and
 [`install/redeem.sh`](install/redeem.sh) is a reference implementation in POSIX
 shell — if you would rather implement the protocol yourself,
-[`protocol/v1.md`](protocol/v1.md) specifies every signed byte and
+[the whitepaper](docs/whitepaper.md) specifies every signed byte and
 [`protocol/test-vectors/v1.json`](protocol/test-vectors/v1.json) lets you check
 your work before talking to anything real.
 
@@ -260,7 +260,7 @@ Before redeeming, fetch `GET /v1/hosts/<host_id>` and verify it: the record must
 name your `host_id`, the identity key in it must hash to that `host_id`, and the
 signature must verify under that key. Take the address and the SSH host key
 from the record and pin the host key when you connect. Both redeemers do this;
-[`protocol/v1.md` §7.1](protocol/v1.md) specifies it. Skipping the pin hands
+[`docs/whitepaper.md` §7.1](docs/whitepaper.md) specifies it. Skipping the pin hands
 whoever resolves the address the choice of which machine you land on.
 
 **If you want to grant access**, `POST /grants` on the owner Unix socket. That
@@ -386,7 +386,7 @@ hostile coordination service. It has had one internal review, whose findings
 are fixed in this tree, and no external security review — worth knowing before
 you point it at something that matters.
 
-Start with [`protocol/v1.md`](protocol/v1.md) — the whole security argument is
+Start with [the whitepaper](docs/whitepaper.md) — the whole security argument is
 there. Then [`go/signer/redeem.go`](go/signer/redeem.go), the only code path
 that can produce SSH access, and
 [`go/signer/store/store.go`](go/signer/store/store.go), where single-use is

@@ -11,7 +11,7 @@ import (
 	"github.com/derekmeegan/grantd/go/internal/canonical"
 )
 
-// Domain separation strings (protocol/v1.md section 1.4).
+// Domain separation strings (docs/whitepaper.md §5.1).
 const (
 	CtxHostRegister  = "grantd/v1/host-register"
 	CtxHostConnect   = "grantd/v1/host-connect"

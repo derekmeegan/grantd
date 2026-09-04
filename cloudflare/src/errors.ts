@@ -1,4 +1,4 @@
-/** Protocol error codes and the uniform error envelope, protocol/v1.md section 10. */
+/** Protocol error codes and the uniform error envelope, docs/whitepaper.md §9. */
 
 export const ERR = {
   BAD_REQUEST: "BAD_REQUEST",

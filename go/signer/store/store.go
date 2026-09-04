@@ -418,7 +418,7 @@ type ClaimResult struct {
 // grant.
 //
 // There is no retry path. A lost response costs one more grant. See
-// protocol/v1.md section 8.
+// docs/whitepaper.md §7.
 //
 // verify receives the stored secret and must not retain it.
 func (s *Store) ClaimGrant(

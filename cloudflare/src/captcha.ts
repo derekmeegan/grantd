@@ -3,7 +3,7 @@
  *
  * /v1/agent-challenges and /v1/agents are unauthenticated and allocate
  * Durable Objects. The proof of work puts a CPU cost on each registration.
- * It protects the bill. It is not a security boundary, see protocol/v1.md
+ * It protects the bill. It is not a security boundary, see docs/whitepaper.md
  * section 11.
  */
 

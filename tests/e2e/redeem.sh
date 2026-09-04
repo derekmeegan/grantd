@@ -3,7 +3,7 @@
 # Redeem a grantd capability URL and open an SSH session.
 #
 # This is the reference client. It uses curl, openssl, ssh-keygen and
-# coreutils only, and follows protocol/v1.md. The proof of work at first
+# coreutils only, and follows docs/whitepaper.md. The proof of work at first
 # registration uses python3 when present, because a shell loop is slow.
 #
 # Usage:
@@ -160,7 +160,7 @@ b64u_decode_hex() {
 json_str() { printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
 json_num() { printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p" | head -1; }
 
-# CBE, protocol/v1.md section 1:
+# CBE, docs/whitepaper.md §5.1:
 #   CBE(context, fields) = LP(utf8(context)) || u32be(len(fields))
 #                          || for each: LP(utf8(name)) || tag || LP(value)
 lp()       { printf '%s%s' "$(u32 $(( ${#1} / 2 )))" "$1"; }

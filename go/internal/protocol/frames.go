@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Rendezvous frame types (protocol/v1.md section 10). The list is complete.
+// Rendezvous frame types (docs/whitepaper.md §9). The list is complete.
 // There is no generic RPC frame and no frame that carries a command, a path,
 // or a filename.
 const (

@@ -457,7 +457,7 @@ func TestGrantIsSingleUse(t *testing.T) {
 
 // TestReplayingAWonRedemptionIsRejected pins the absence of a retry path. A
 // grant is consumed once, even for the agent that won it. A lost response
-// costs one more grant. See protocol/v1.md section 8.
+// costs one more grant. See docs/whitepaper.md §7.
 func TestReplayingAWonRedemptionIsRejected(t *testing.T) {
 	s := newSigner(t)
 	ctx := context.Background()
