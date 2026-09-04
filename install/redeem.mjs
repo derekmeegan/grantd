@@ -35,6 +35,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, chmodS
 import { dirname, join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { connect as tcpConnect } from "node:net";
+import { connect as tlsConnect } from "node:tls";
 import { pathToFileURL } from "node:url";
 
 const PROTOCOL_VERSION = 1;
@@ -560,6 +561,9 @@ function parseArgs(argv) {
     else if (a === "--identity") opts.identity = argv[++i];
     else if (a === "--json") opts.json = true;
     else if (a === "--no-probe") opts.noProbe = true;
+    // ProxyCommand mode. ssh runs this file again with this flag; it is not
+    // a flag a person passes.
+    else if (a === "--bridge") opts.bridge = argv[++i];
     else if (a === "-h" || a === "--help") opts.help = true;
     else if (a === "-") opts.url = readFileSync(0, "utf8").trim();
     else if (a.startsWith("-")) throw new Error(`unknown flag: ${a}`);
@@ -568,8 +572,218 @@ function parseArgs(argv) {
   return opts;
 }
 
+
+// ------------------------------------------------------------------ bridge
+//
+// When there is no raw TCP path to the host, the session can go over the
+// host's WebSocket bridge on 443 instead. A sandbox that allows HTTPS and
+// nothing else allows this, because to its gateway it is HTTPS.
+//
+// This file is its own ProxyCommand: `node redeem.mjs --bridge wss://h/ssh`
+// makes stdin and stdout the SSH transport. Doing it here rather than reusing
+// the python shim means the Node path needs nothing that running this script
+// did not already require.
+//
+// The transport moves; nothing else does. ssh still pins the host key by host
+// id and still presents the certificate the host's CA issued, so what
+// authorises the session is unchanged.
+
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/** A TLS socket to host:port, through an HTTP CONNECT proxy when one is set. */
+function bridgeSocket(host, port) {
+  return new Promise((resolve, reject) => {
+    // Parity with bridge-proxy.py. TLS here protects the transport; what
+    // protects the session is the SSH host key ssh pins and the certificate
+    // the host's CA issued, and neither depends on this.
+    const insecure = process.env.GRANTD_BRIDGE_INSECURE_TLS === "1";
+    if (insecure) {
+      process.stderr.write(
+        "redeem.mjs: WARNING: TLS certificate checking is off " +
+        "(GRANTD_BRIDGE_INSECURE_TLS=1). The SSH host key is still pinned, so " +
+        "the session is still verified; only the transport is unauthenticated.\n");
+    }
+    const tlsOpts = insecure ? { rejectUnauthorized: false } : {};
+    const proxy = proxyFor(host);
+    if (!proxy) {
+      const s = tlsConnect({ host, port, servername: host, ...tlsOpts }, () => resolve(s));
+      s.on("error", reject);
+      return;
+    }
+    const raw = tcpConnect({ host: proxy.host, port: proxy.port });
+    let head = "", tunnelled = false;
+    raw.on("error", reject);
+    raw.on("connect", () => {
+      const auth = proxy.auth
+        ? `Proxy-Authorization: Basic ${Buffer.from(proxy.auth).toString("base64")}\r\n` : "";
+      raw.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
+    });
+    raw.on("data", function onHead(d) {
+      if (tunnelled) return;
+      head += d.toString("latin1");
+      if (!head.includes("\r\n\r\n")) return;
+      const status = head.split("\r\n")[0];
+      if (!/ 2\d\d /.test(status + " ")) {
+        raw.destroy();
+        return reject(new Error(`the proxy refused a tunnel to ${host}:${port}: "${status.trim()}"`));
+      }
+      tunnelled = true;
+      raw.removeListener("data", onHead);
+      const s = tlsConnect({ socket: raw, servername: host, ...tlsOpts }, () => resolve(s));
+      s.on("error", reject);
+    });
+  });
+}
+
+/** Upgrades an open socket. Resolves with any bytes read past the headers. */
+function wsHandshake(sock, hostHeader, path) {
+  return new Promise((resolve, reject) => {
+    const key = randomBytes(16).toString("base64");
+    sock.write(
+      `GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nUpgrade: websocket\r\n` +
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\n` +
+      `Sec-WebSocket-Version: 13\r\n\r\n`);
+    let head = Buffer.alloc(0);
+    const onData = (d) => {
+      head = Buffer.concat([head, d]);
+      const i = head.indexOf("\r\n\r\n");
+      if (i === -1) return;
+      sock.removeListener("data", onData);
+      const lines = head.subarray(0, i).toString("latin1").split("\r\n");
+      if (!lines[0].includes("101")) {
+        return reject(new Error(`the bridge did not accept the upgrade (${lines[0]})`));
+      }
+      // Proves the peer is a WebSocket endpoint, not something that answered
+      // 101 for reasons of its own.
+      const want = createHash("sha1").update(key + WS_GUID).digest("base64");
+      const got = lines.slice(1)
+        .map((l) => l.split(":"))
+        .find((kv) => kv[0].trim().toLowerCase() === "sec-websocket-accept");
+      if (!got || got.slice(1).join(":").trim() !== want) {
+        return reject(new Error("the bridge's handshake did not verify"));
+      }
+      resolve(head.subarray(i + 4));
+    };
+    sock.on("data", onData);
+    sock.on("error", reject);
+    sock.on("end", () => reject(new Error("the host closed the connection during the WebSocket handshake")));
+  });
+}
+
+/** A masked frame. A client must mask; a server must not. */
+function wsFrame(payload, opcode = 0x2) {
+  const n = payload.length;
+  let head;
+  if (n < 126) {
+    head = Buffer.from([0x80 | opcode, 0x80 | n]);
+  } else if (n < 65536) {
+    head = Buffer.alloc(4);
+    head[0] = 0x80 | opcode; head[1] = 0xFE; head.writeUInt16BE(n, 2);
+  } else {
+    head = Buffer.alloc(10);
+    head[0] = 0x80 | opcode; head[1] = 0xFF; head.writeBigUInt64BE(BigInt(n), 2);
+  }
+  const mask = randomBytes(4);
+  const body = Buffer.allocUnsafe(n);
+  for (let i = 0; i < n; i++) body[i] = payload[i] ^ mask[i % 4];
+  return Buffer.concat([head, mask, body]);
+}
+
+/** Reassembles frames. Control frames are answered or ignored here. */
+function wsReader(sock, leftover, onMessage, onClose) {
+  let buf = leftover;
+  const pump = () => {
+    for (;;) {
+      if (buf.length < 2) return;
+      const opcode = buf[0] & 0x0F;
+      const masked = buf[1] & 0x80;
+      let n = buf[1] & 0x7F, off = 2;
+      if (n === 126) { if (buf.length < 4) return; n = buf.readUInt16BE(2); off = 4; }
+      else if (n === 127) { if (buf.length < 10) return; n = Number(buf.readBigUInt64BE(2)); off = 10; }
+      let mask = null;
+      if (masked) { if (buf.length < off + 4) return; mask = buf.subarray(off, off + 4); off += 4; }
+      if (buf.length < off + n) return;
+      let payload = buf.subarray(off, off + n);
+      if (mask) {
+        const un = Buffer.allocUnsafe(n);
+        for (let i = 0; i < n; i++) un[i] = payload[i] ^ mask[i % 4];
+        payload = un;
+      }
+      buf = buf.subarray(off + n);
+      if (opcode === 0x8) return onClose();
+      if (opcode === 0x9) { sock.write(wsFrame(payload, 0xA)); continue; }
+      if (opcode === 0xA) continue;
+      onMessage(payload);
+    }
+  };
+  pump();
+  sock.on("data", (d) => { buf = Buffer.concat([buf, d]); pump(); });
+  sock.on("end", onClose);
+  sock.on("error", onClose);
+}
+
+function parseWssUrl(raw) {
+  const u = new URL(raw);
+  if (u.protocol !== "wss:") {
+    throw new Error(`only wss:// is supported; got "${u.protocol.replace(":", "")}"`);
+  }
+  return { host: u.hostname, port: Number(u.port || 443), hostHeader: u.host,
+           path: (u.pathname || "/") + (u.search || "") };
+}
+
+/** Opens the bridge and closes it. Answers one question and spends nothing. */
+async function probeBridge(url) {
+  try {
+    const { host, port, hostHeader, path } = parseWssUrl(url);
+    const sock = await bridgeSocket(host, port);
+    await wsHandshake(sock, hostHeader, path);
+    sock.destroy();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** ProxyCommand mode: stdin and stdout become the SSH transport. */
+async function runBridge(url) {
+  const { host, port, hostHeader, path } = parseWssUrl(url);
+  const sock = await bridgeSocket(host, port);
+  const leftover = await wsHandshake(sock, hostHeader, path);
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    try { sock.destroy(); } catch { /* already gone */ }
+    process.exit(0);
+  };
+  wsReader(sock, leftover, (payload) => process.stdout.write(payload), finish);
+  process.stdin.on("data", (d) => sock.write(wsFrame(d)));
+  process.stdin.on("end", finish);
+  sock.on("close", finish);
+}
+
+
+/**
+ * The ProxyCommand ssh will run, as a string.
+ *
+ * ssh needs a path to this file. When this script was piped into node there
+ * is no argv[1] to point at, so a copy is fetched beside the key material —
+ * the same origin that served the script running now.
+ */
+async function bridgeProxyCommand(origin, out, url) {
+  let script = process.argv[1] && existsSync(process.argv[1]) ? process.argv[1] : null;
+  if (!script) {
+    const res = await fetch(`${origin}/redeem.mjs`);
+    if (!res.ok) throw new Error(`could not fetch redeem.mjs for the bridge (HTTP ${res.status})`);
+    script = join(out, "redeem.mjs");
+    writeFileSync(script, await res.text(), { mode: 0o700 });
+  }
+  return `${process.execPath} ${script} --bridge ${url}`;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  if (opts.bridge) return await runBridge(opts.bridge);
   const log = (m) => { if (!opts.json) console.error(m); };
   if (opts.help || !opts.url) {
     console.error("usage: node redeem.mjs [URL] [--out DIR] [--identity FILE] [--json] [--no-probe]");
@@ -592,10 +806,24 @@ async function main() {
   // Check the path to the host before spending the grant. The advice has to
   // match the actual cause: telling someone to widen an allowlist when the
   // real problem is a TLS-inspecting proxy sends them after the wrong fix.
+  let transport = "direct";
+  let bridgeUrl = null;
   if (!opts.noProbe) {
     const probe = await probeReachable(host.hostname, host.ssh_port);
     if (!probe.ok) {
       const target = `${host.hostname}:${host.ssh_port}`;
+
+      // Before giving up: the host may serve the session over a WebSocket on
+      // 443. A sandbox that carries no SSH usually does carry that, which is
+      // the whole reason the bridge exists.
+      log(`direct ssh to ${target} is not available here; looking for a bridge`);
+      const candidate = `wss://${host.hostname}/ssh`;
+      if (await probeBridge(candidate)) {
+        transport = "bridge";
+        bridgeUrl = candidate;
+        log(`bridge: ${candidate}`);
+      }
+
       let advice;
       if (probe.carriedNoSSH) {
         advice =
@@ -612,15 +840,20 @@ async function main() {
   If the host listens only on 22, ask its operator to re-run the installer
   with --listen-port 443, which most sandboxes allow.`;
       }
-      throw new Error(
+      if (transport !== "bridge") {
+        throw new Error(
 `this machine cannot reach ${target}, so the session could not be opened.
   ${probe.detail}
 The grant was NOT spent. It is still valid until it expires.
 
 ${advice}
+  If this sandbox allows only HTTP and TLS, ask the host's operator to run
+  install/bridge.sh, which serves the session over a WebSocket on 443.
   Set GRANTD_NO_PROBE=1 to redeem anyway.`);
+      }
+    } else {
+      log(`reachable: ${host.hostname}:${host.ssh_port} via ${probe.viaProxy ? "HTTP CONNECT proxy" : "direct TCP"}`);
     }
-    log(`reachable: ${host.hostname}:${host.ssh_port} via ${probe.viaProxy ? "HTTP CONNECT proxy" : "direct TCP"}`);
   }
 
   const identity = loadIdentity(opts.identity);
@@ -694,10 +927,17 @@ ${advice}
   writeFileSync(keyPath + ".pub", sshLine + "\n", { mode: 0o644 });
   writeFileSync(certPath, response.certificate + "\n", { mode: 0o644 });
 
+  // ssh is told to run this file as its ProxyCommand only when the direct
+  // path is unavailable. Everything else about the invocation is identical.
+  const proxyCommand = transport === "bridge"
+    ? await bridgeProxyCommand(cap.origin, out, bridgeUrl) : null;
+  const proxyLine = proxyCommand ? `\n    -o ProxyCommand='${proxyCommand}' \\` : "";
+
   if (opts.json) {
     console.log(JSON.stringify({
       ...response, key_file: keyPath, certificate_file: certPath, known_hosts_file: knownHostsPath,
       host_key_alias: cap.hostId,
+      transport, ...(transport === "bridge" ? { proxy_command: proxyCommand, bridge_url: bridgeUrl } : {}),
       key_fingerprint: sshFingerprint(sshEd25519Blob(sshRawPub)),
       valid_before_iso: new Date(Number(cert.validBefore) * 1000).toISOString(),
     }, null, 2));
@@ -713,11 +953,17 @@ ssh -i '${keyPath}' \\
     -o UserKnownHostsFile='${knownHostsPath}' \\
     -o StrictHostKeyChecking=yes \\
     -o HostKeyAlias=${cap.hostId} \\
-    -o HostKeyAlgorithms=ssh-ed25519 \\
+    -o HostKeyAlgorithms=ssh-ed25519 \\${proxyLine}
     -l '${host.ssh_user}' -p ${host.ssh_port} -- '${host.hostname}'
 
-The host key is pinned in ${knownHostsPath}, keyed by host id. Keep those
-options: without them ssh accepts whatever machine answers the address.
+${transport === "bridge"
+? `This machine has no raw TCP path to ${host.hostname}:${host.ssh_port}, so the session
+goes over the host's WebSocket bridge on 443. TLS terminates on the host, not
+on the coordination service, and the host key pinned in ${knownHostsPath}
+still gates the session exactly as it would directly. Keep every one of those
+options.`
+: `The host key is pinned in ${knownHostsPath}, keyed by host id. Keep those
+options: without them ssh accepts whatever machine answers the address.`}
 
 This script does not open the session. If there is no ssh binary here, use a
 JavaScript SSH client such as ssh2, loading ${keyPath}
@@ -748,4 +994,5 @@ export {
   openSshPrivateKey, parseCertificate, parseCapabilityURL, verifyHostRecord,
   probeReachable, signRaw, verifyRaw, rawPublicKey, publicKeyFromRaw, solvePow,
   api, proxyFromEnv, ProxyError,
+  parseWssUrl, wsFrame, probeBridge, runBridge,
 };

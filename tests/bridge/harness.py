@@ -1,5 +1,6 @@
 """Stands in for nginx: a stub sshd, and TLS in front of the real bridge."""
 import os
+import shutil
 import socket
 import ssl
 import subprocess
@@ -117,6 +118,7 @@ try:
     shim = os.path.join(REPO, "install", "bridge-proxy.py")
     env = dict(os.environ, GRANTD_BRIDGE_INSECURE_TLS="1")
 
+    exercised = []
     # 1. The shim's own probe agrees a bridge is there.
     if subprocess.run([sys.executable, shim, "--probe", "wss://localhost:%d/ssh" % front],
                       env=env, capture_output=True).returncode != 0:
@@ -160,7 +162,41 @@ try:
             fail("the transport was not byte-exact:\n    got  %r\n    want %r"
                  % (out[len(BANNER):], PAYLOAD))
 
-    # 3. Only wss. A visitor must not be talked into an unencrypted transport.
+    exercised.append("python shim")
+
+    # 3. The Node shim carries the same transport. redeem.mjs is its own
+    #    ProxyCommand, so a sandbox with node and no python3 still has a path;
+    #    that only holds if both shims stay byte-exact.
+    if shutil.which("node"):
+        mjs = os.path.join(REPO, "install", "redeem.mjs")
+        nenv = dict(os.environ, GRANTD_BRIDGE_INSECURE_TLS="1")
+        p = subprocess.Popen(["node", mjs, "--bridge", "wss://localhost:%d/ssh" % front],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=nenv)
+        p.stdin.write(PAYLOAD)
+        p.stdin.flush()
+        out = b""
+        deadline = time.time() + 20
+        while len(out) < want and time.time() < deadline:
+            r, _, _ = select.select([p.stdout], [], [], 0.5)
+            if r:
+                chunk = os.read(p.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                out += chunk
+        p.kill()
+        if out[:len(BANNER)] != BANNER:
+            fail("node shim banner = %r, want %r" % (out[:len(BANNER)], BANNER))
+        if out[len(BANNER):] != PAYLOAD:
+            fail("the node shim was not byte-exact:\n    got  %r\n    want %r"
+                 % (out[len(BANNER):], PAYLOAD))
+        r = subprocess.run(["node", mjs, "--bridge", "ws://localhost:%d/ssh" % front],
+                           env=nenv, capture_output=True)
+        if r.returncode == 0 or b"only wss" not in r.stderr:
+            fail("the node shim accepted a ws:// URL")
+        exercised.append("node shim")
+
+    # 4. Only wss. A visitor must not be talked into an unencrypted transport.
     r = subprocess.run([sys.executable, shim, "ws://localhost:%d/ssh" % front],
                        env=env, capture_output=True)
     if r.returncode == 0 or b"only wss" not in r.stderr:
@@ -168,4 +204,4 @@ try:
 finally:
     proc.kill()
 
-print("ok   the bridge carries an ssh transport byte for byte")
+print("ok   the bridge carries an ssh transport byte for byte (%s)" % ", ".join(exercised))
