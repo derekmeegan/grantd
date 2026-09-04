@@ -155,6 +155,32 @@ and the record is never proxied — SSH still goes direct. This requires the
 service to be configured for it; see
 [`cloudflare/README.md`](cloudflare/README.md#host-dns-naming).
 
+### When the visitor has no raw TCP
+
+Some sandboxes — Claude's among them — allow HTTP over TLS and nothing else.
+A gateway there will carry a TLS handshake and reset a plaintext SSH
+identification string, so no port helps: 22 is blocked and 443 is inspected.
+
+For those, the host can serve the session over a WebSocket on 443:
+
+```sh
+sudo ./bridge.sh --email you@example.com
+```
+
+That installs nginx and certbot, obtains a certificate for the machine's
+`--dns-suffix` name, and runs `grantd-bridge`, which copies bytes between a
+WebSocket and `127.0.0.1:22` and does nothing else — the target is compiled
+in, so no request can move it. Visitors need no new flags: `redeem.sh` probes
+the direct path first, and falls back to the bridge only when it must.
+
+The bridge changes the pipe, not the trust. TLS terminates on your host, so
+the coordination service is still not in the path and still never sees a byte
+of the session; the visitor still pins the host key and still presents a
+certificate your CA issued. What does change is that sshd sees every bridged
+session as coming from `127.0.0.1`, so per-source controls like fail2ban
+cannot see a bridged visitor — nginx's connection and rate limits replace
+them.
+
 Fetching `install` from the service means trusting the service to deliver
 that one script. If that is not acceptable, use
 [`install/install.sh`](install/install.sh) from a tagged release of this

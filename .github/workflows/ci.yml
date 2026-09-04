@@ -39,7 +39,7 @@ permissions:
 env:
   GRANTD_ORIGIN: ${{ github.event.inputs.origin || 'https://grantd.derekmeegan.workers.dev' }}
   # Actions are pinned to commit hashes. Update the hash and the comment together.
-  GRANTD_VERSION: v0.3.0
+  GRANTD_VERSION: v0.4.0
 
 jobs:
   go:
@@ -63,6 +63,11 @@ jobs:
         run: |
           go run ./cmd/protocol-vectors /tmp/regen.json
           diff -u ../protocol/test-vectors/v1.json /tmp/regen.json
+      - name: the bridge carries an ssh transport byte for byte
+        # Runs the real bridge and the real shim against a stub sshd. No
+        # network: this is the contract between the two halves, which breaks
+        # silently if either is changed alone.
+        run: sh tests/bridge/run.sh
       - name: every visitor ssh invocation pins the host key
         # StrictHostKeyChecking=no on a grantd certificate undoes the visitor's
         # only protection against being sent to the wrong machine. It is the

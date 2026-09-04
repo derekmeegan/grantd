@@ -9,7 +9,7 @@
   "observability": { "enabled": true },
   // The reference redeemer is served from the single copy in install/, so the
   // script agents download is always the one the test suite exercises.
-  "rules": [{ "type": "Text", "globs": ["**/*.sh", "**/redeem.mjs"] }],
+  "rules": [{ "type": "Text", "globs": ["**/*.sh", "**/*.py", "**/redeem.mjs"] }],
   "vars": {
     "PUBLIC_ORIGIN": "",
     // Host DNS naming. The matching CF_DNS_TOKEN is a secret, set with

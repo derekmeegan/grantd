@@ -70,7 +70,7 @@ mkdir -p "$STAGE"
 log "building $VERSION"
 COMMIT="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 for arch in amd64 arm64; do
-  for cmd in grantd grant-signer; do
+  for cmd in grantd grant-signer grantd-bridge; do
     # -trimpath removes local paths and CGO is off, so nothing of the build
     # host ends up in a signed artifact.
     ( cd "$REPO/go" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
@@ -78,7 +78,7 @@ for arch in amd64 arm64; do
           -o "$STAGE/${cmd}-linux-${arch}" "./cmd/$cmd" )
   done
 done
-log "built 4 artifacts"
+log "built 6 artifacts"
 
 # The installer checks this file against the version it asked for. It is
 # hashed with the binaries, so an old signed release cannot be served under a
@@ -90,6 +90,7 @@ printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 ( cd "$STAGE" && sha256sum \
     grantd-linux-amd64 grantd-linux-arm64 \
     grant-signer-linux-amd64 grant-signer-linux-arm64 \
+    grantd-bridge-linux-amd64 grantd-bridge-linux-arm64 \
     VERSION > SHA256SUMS )
 log "hashed"
 

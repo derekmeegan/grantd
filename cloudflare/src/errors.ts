@@ -87,8 +87,11 @@ export function textResponse(
  * of install.sh or redeem.sh can be an old version, and the person who runs
  * it cannot tell.
  */
-export function scriptResponse(body: string): Response {
-  return textResponse(body, 200, "text/x-shellscript; charset=utf-8", {
+export function scriptResponse(
+  body: string,
+  contentType = "text/x-shellscript; charset=utf-8",
+): Response {
+  return textResponse(body, 200, contentType, {
     "cache-control": "no-store, must-revalidate",
   });
 }

@@ -130,6 +130,20 @@ describe("public surface", () => {
     expect(text).toContain("Do not send the secret");
   });
 
+  it("serves the bridge ProxyCommand shim, uncached", async () => {
+    const res = await SELF.fetch(`${ORIGIN}/bridge-proxy.py`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/x-python");
+    // A cached copy of a script someone pipes into an interpreter can be an
+    // old version, and the person running it cannot tell.
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    const text = await res.text();
+    expect(text).toContain("ProxyCommand");
+    // Served from the single copy in install/, so this is the script the
+    // bridge tests exercise.
+    expect(text).toContain("only wss:// is supported");
+  });
+
   it("rejects malformed identifiers", async () => {
     expect((await SELF.fetch(`${ORIGIN}/g/nope/also-nope`)).status).toBe(400);
     expect((await SELF.fetch(`${ORIGIN}/v1/hosts/h_short`)).status).toBe(400);

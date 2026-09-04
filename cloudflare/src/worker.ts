@@ -17,6 +17,7 @@ import { docsMarkdown, grantInstructions } from "./routes/docs";
 import redeemScript from "../../install/redeem.sh";
 import installScriptFile from "../../install/install.sh";
 import redeemNodeScript from "../../install/redeem.mjs";
+import bridgeProxyScript from "../../install/bridge-proxy.py";
 import type { Env, RateLimiter } from "./env";
 
 export { HostDO } from "./durable-objects/host";
@@ -73,6 +74,12 @@ async function route(request: Request, env: Env): Promise<Response> {
       }
     });
     return new Response(null, { status: 101, webSocket: client });
+  }
+  // The ProxyCommand shim, for a visitor whose sandbox has no raw TCP egress.
+  // Served from the single copy in install/, like the redeemers, so the script
+  // a visitor runs is the one the test suite exercises.
+  if (request.method === "GET" && seg[0] === "bridge-proxy.py") {
+    return scriptResponse(bridgeProxyScript, "text/x-python; charset=utf-8");
   }
   if (request.method === "GET" && seg[0] === "install") {
     return scriptResponse(installScriptFile);

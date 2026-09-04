@@ -347,61 +347,123 @@ note "pinned: host key $HOST_KEY_FP"
 # A grant is single use. Burning one and then finding that this machine
 # cannot open a session wastes it, so check the path to the host first.
 #
-# Sandboxes often have no raw TCP egress and reach the network only through
-# an HTTP CONNECT proxy. CONNECT builds a byte pipe, and SSH runs over it
-# unchanged, so a proxy that permits the host and port is a working path.
+# The check speaks SSH, and that is the whole point of it. A sandbox gateway
+# that inspects the first bytes of a tunnel will carry a TLS handshake and
+# reset a plaintext SSH identification string. A probe that spoke TLS — as a
+# curl probe does — would call such a path reachable, and the grant would be
+# spent before ssh failed. So this reads the server banner, sends an
+# identification string of its own, and only then calls the path usable.
 
-probe() { # probe HOST PORT -> 0 if reachable
-  _proxy="${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}"
-  # NO_PROXY, as curl reads it. The API calls above already honour it, since
-  # plain curl does; this probe names the proxy explicitly with -x, which
-  # would otherwise override the list and send a loopback or allowlisted host
-  # through the proxy, where it fails in a way that reads as the host being
-  # down. An exact match goes to the direct probe below, which reads the SSH
-  # banner; anything subtler (a suffix, a CIDR) is left to curl's own --noproxy.
-  _np="${NO_PROXY:-${no_proxy:-}}"
-  case ",$(printf '%s' "$_np" | tr -d ' ')," in *",$1,"*|*",*,"*) _proxy="" ;; esac
-  if [ -n "$_proxy" ]; then
-    _ph="$(printf '%s' "$_proxy" | sed 's|^[a-zA-Z]*://||; s|/.*$||; s|^.*@||')"
-    # -sS, not -s. Silent mode hides the message this check reads.
-    _err="$(curl -sS -o /dev/null --max-time 10 --proxytunnel -x "$_proxy" \
-      ${_np:+"--noproxy=$_np"} "https://$1:$2" 2>&1)"
-    _rc=$?
-    # A refused tunnel names the status. curl 8 says "CONNECT tunnel failed,
-    # response 403" and older curl says "code 403 from proxy after CONNECT".
-    # An open tunnel fails differently, because sshd sends a banner where curl
-    # expects a TLS handshake.
-    case "$_err" in
-      *"CONNECT tunnel failed"*|*"after CONNECT"*)
-        PROBE_DETAIL="proxy $_ph refused a tunnel to $1:$2 (HTTP $(printf '%s' "$_err" | sed -n 's/.*response \([0-9]*\).*/\1/p;s/.*code \([0-9]*\) from proxy.*/\1/p' | head -1))"
-        return 1 ;;
-    esac
-    case $_rc in
-      0|35|52|56) return 0 ;;
-      *) PROBE_DETAIL="proxy $_ph could not reach $1:$2 (curl $_rc)"; return 1 ;;
-    esac
-  fi
-  if command -v nc >/dev/null 2>&1; then
-    nc -z -w 8 "$1" "$2" >/dev/null 2>&1 && return 0
-    PROBE_DETAIL="no answer from $1:$2"; return 1
-  fi
+PROBE_PY='
+import os, socket, sys
+from urllib.parse import urlparse
+host, port = sys.argv[1], int(sys.argv[2])
+proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+np = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+if host in [h.strip() for h in np.split(",") if h.strip()]:
+    proxy = ""
+try:
+    if proxy:
+        p = urlparse(proxy if "://" in proxy else "http://" + proxy)
+        s = socket.create_connection((p.hostname, p.port or 8080), timeout=10)
+        s.sendall(("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n" % (host, port, host, port)).encode())
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            c = s.recv(1)
+            if not c:
+                sys.exit("the proxy closed the connection during CONNECT")
+            resp += c
+        line = resp.split(b"\r\n")[0].decode("latin-1")
+        if " 200 " not in line:
+            sys.exit("the proxy refused a tunnel to %s:%d (%s)" % (host, port, line))
+    else:
+        s = socket.create_connection((host, port), timeout=10)
+    s.settimeout(10)
+    banner = s.recv(256)
+    if not banner.startswith(b"SSH-"):
+        sys.exit("%s:%d answered, but not with an SSH banner" % (host, port))
+    s.sendall(b"SSH-2.0-grantd-probe\r\n")
+    s.settimeout(3)
+    try:
+        s.recv(1)
+    except socket.timeout:
+        pass
+    except OSError as e:
+        sys.exit("the path carried the banner but not SSH itself (%s)" % e.__class__.__name__)
+    s.close()
+except SystemExit:
+    raise
+except Exception as e:
+    sys.exit("%s:%d is not reachable from here (%s)" % (host, port, e.__class__.__name__))
+'
+
+# probe_ssh HOST PORT -> 0 reachable, 1 unreachable, 2 could not tell
+probe_ssh() {
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import socket,sys; socket.create_connection((sys.argv[1],int(sys.argv[2])),8).close()' "$1" "$2" 2>/dev/null && return 0
-    PROBE_DETAIL="no answer from $1:$2"; return 1
+    PROBE_DETAIL="$(python3 -c "$PROBE_PY" "$1" "$2" 2>&1)" && return 0
+    return 1
   fi
-  return 0  # No probe tool. Continue rather than refuse.
+  # No python3. nc can answer for a direct path; through a proxy the honest
+  # answer is that we cannot tell, because the curl exit codes an open tunnel
+  # produces are the same ones a tunnel that rejects non-TLS bytes produces.
+  if [ -z "${HTTPS_PROXY:-${https_proxy:-}}" ] && command -v nc >/dev/null 2>&1; then
+    nc -z -w 8 "$1" "$2" >/dev/null 2>&1 && return 0
+    PROBE_DETAIL="no answer from $1:$2"
+    return 1
+  fi
+  PROBE_DETAIL="there is no python3 here, so the path could not be checked"
+  return 2
 }
 
-if [ "${GRANTD_NO_PROBE:-0}" != 1 ] && ! probe "$HOST" "$PORT"; then
-  die "this machine cannot reach $HOST:$PORT, so the session could not be opened.
+# probe_bridge HOST -> 0 when the host runs a WebSocket bridge on 443.
+# Uses the shim's own handshake, so what is tested is what will be used.
+probe_bridge() {
+  [ -n "$BRIDGE_PROXY" ] || return 1
+  BRIDGE_DETAIL="$(python3 "$BRIDGE_PROXY" --probe "wss://$1/ssh" 2>&1)" && return 0
+  return 1
+}
+
+# fetch_bridge_proxy: puts the shim beside the key material, from the same
+# origin that served this script.
+fetch_bridge_proxy() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  _bp="$OUT/bridge-proxy.py"
+  curl -fsS --max-time 20 "$ORIGIN/bridge-proxy.py" -o "$_bp" 2>/dev/null || return 1
+  BRIDGE_PROXY="$_bp"
+  return 0
+}
+
+BRIDGE_PROXY=""
+TRANSPORT=direct
+if [ "${GRANTD_NO_PROBE:-0}" != 1 ]; then
+  # set -e would abort on the non-zero return before the fallback below ever
+  # ran, so the status is captured rather than left in statement position.
+  _probe_rc=0
+  probe_ssh "$HOST" "$PORT" || _probe_rc=$?
+  if [ "$_probe_rc" -eq 1 ]; then
+    # Direct SSH will not work. Before giving up, see whether the host runs
+    # the bridge: a sandbox that allows HTTPS usually allows this.
+    note "direct ssh to $HOST:$PORT is not available here; looking for a bridge"
+    if fetch_bridge_proxy && probe_bridge "$HOST"; then
+      TRANSPORT=bridge
+      note "bridge:  wss://$HOST/ssh"
+    else
+      die "this machine cannot reach $HOST:$PORT, so the session could not be opened.
   $PROBE_DETAIL
 The grant was NOT spent. It is still valid until it expires.
 
-grantd needs a path to the host's SSH port. Either raw outbound TCP, or an
-HTTP CONNECT proxy in HTTPS_PROXY that permits this host and port.
+grantd needs a path to the host. Either raw outbound TCP to the SSH port, an
+HTTP CONNECT proxy in HTTPS_PROXY that carries SSH, or the host's WebSocket
+bridge on 443.
   If the host listens only on 22, ask its operator to re-run the installer
   with --listen-port 443, which most sandboxes allow.
+  If this sandbox allows only HTTP and TLS, ask its operator to run
+  install/bridge.sh, which serves the session over a WebSocket on 443.
   Set GRANTD_NO_PROBE=1 to redeem anyway."
+    fi
+  elif [ "$_probe_rc" -eq 2 ]; then
+    note "could not check the path to $HOST:$PORT ($PROBE_DETAIL); continuing"
+  fi
 fi
 
 # ------------------------------------------------------------------ identity
@@ -564,7 +626,26 @@ echo "$RESP"
 # The pinned form is the only form this script emits. Without a known_hosts
 # entry ssh cannot prompt when there is no terminal and fails, and the reflex
 # fix, StrictHostKeyChecking=no, accepts whatever machine answers.
+# Over the bridge the transport changes and nothing else does. HostKeyAlias
+# is still the host id and the known_hosts entry is still the one written
+# above, so the same pin gates the same session; ssh simply talks to a
+# WebSocket instead of a socket it opened itself.
+if [ "$TRANSPORT" = bridge ]; then
+  PROXY_OPT="python3 $BRIDGE_PROXY wss://$HOST/ssh"
+fi
+
 if [ "$CONNECT" -eq 1 ]; then
+  if [ "$TRANSPORT" = bridge ]; then
+    exec ssh -i "$OUT/id_ed25519" \
+      -o CertificateFile="$CERT_FILE" \
+      -o IdentitiesOnly=yes \
+      -o UserKnownHostsFile="$KNOWN_HOSTS" \
+      -o StrictHostKeyChecking=yes \
+      -o HostKeyAlias="$HOST_ID" \
+      -o HostKeyAlgorithms=ssh-ed25519 \
+      -o ProxyCommand="$PROXY_OPT" \
+      -l "$USER" -p "$PORT" -- "$HOST" "$@"
+  fi
   exec ssh -i "$OUT/id_ed25519" \
     -o CertificateFile="$CERT_FILE" \
     -o IdentitiesOnly=yes \
@@ -575,6 +656,25 @@ if [ "$CONNECT" -eq 1 ]; then
     -l "$USER" -p "$PORT" -- "$HOST" "$@"
 fi
 
+if [ "$TRANSPORT" = bridge ]; then
+cat >&2 <<EOF
+
+ssh -i '$OUT/id_ed25519' \\
+    -o CertificateFile='$CERT_FILE' \\
+    -o IdentitiesOnly=yes \\
+    -o UserKnownHostsFile='$KNOWN_HOSTS' \\
+    -o StrictHostKeyChecking=yes \\
+    -o HostKeyAlias=$HOST_ID \\
+    -o HostKeyAlgorithms=ssh-ed25519 \\
+    -o ProxyCommand='$PROXY_OPT' \\
+    -l '$USER' -p $PORT -- '$HOST'
+
+This machine has no raw TCP path to $HOST:$PORT, so the session goes over the
+host's WebSocket bridge on 443. TLS there terminates on the host, not on the
+coordination service, and the host key pinned in $KNOWN_HOSTS still gates the
+session exactly as it would directly. Keep every one of those options.
+EOF
+else
 cat >&2 <<EOF
 
 ssh -i '$OUT/id_ed25519' \\
@@ -588,3 +688,4 @@ ssh -i '$OUT/id_ed25519' \\
 
 The host key is pinned in $KNOWN_HOSTS, keyed by host id. Keep those options.
 EOF
+fi
