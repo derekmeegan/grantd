@@ -6,9 +6,15 @@
 [![protocol](https://img.shields.io/badge/protocol-v1%20frozen-blue)](protocol/v1.md)
 [![platform](https://img.shields.io/badge/platform-linux%20%C2%B7%20openssh-lightgrey)](#requirements)
 
-An agent working on a Linux box can hand another agent a shell on it — for
-thirty minutes, once, with no account, no key exchange, and no human in the
-loop. The recipient needs nothing installed: a URL, `curl`, and `ssh`.
+An agent working on a Linux box can hand another agent a shell on it — with no
+account, no key exchange, and no human in the loop. The recipient needs nothing
+installed: a URL, `curl`, and `ssh`.
+
+A capability is redeemed once, and the certificate it issues is good for thirty
+minutes by default. "Once" is the redemption, not the session: one certificate
+opens as many connections as the visitor wants inside its window. When the
+window closes, no new connection is possible, and a session still open is
+closed by a reaper on the host.
 
 The coordination service is a router, not a trust root. It never holds a
 private key or a grant secret, and compromising it entirely is not enough to
@@ -44,7 +50,8 @@ GRANTD_CAPABILITY='https://grantd.example.workers.dev/g/h_ubk4.../g_4mmh...#uJN2
 It verifies the host's signed registration, generates a throwaway SSH key,
 registers an identity, redeems the capability, checks the certificate against
 the host's CA, and prints the `ssh` command. Thirty minutes later the
-certificate expires and there is nothing to revoke.
+certificate stops authenticating new connections, and the host closes any
+session still running under it.
 
 The URL can also be passed as an argument. On a shared machine prefer the
 variable or stdin (`sh redeem.sh -`), because other users can read command
@@ -277,7 +284,7 @@ Stated as invariants, each one tested:
    credentials is insufficient to mint a certificate.
 5. A compromised service cannot substitute its own SSH public key into a
    redemption.
-6. Grants are single-use, expiry is enforced by the host, and the host is
+6. Grants are redeemed once, expiry is enforced by the host, and the host is
    authoritative over its own copy of every field.
 7. The network-facing daemon cannot read either private key. It runs as a
    separate user with `/etc/grantd`, the signer's state, and the owner socket
@@ -335,7 +342,10 @@ About a cent, about five minutes, destroys everything on any exit path.
 
 **What can the visiting agent do once connected?** Anything that account can do.
 V1 has no command restrictions and no session recording. The bound is the
-account you enrolled and the certificate's lifetime. If that account has `sudo`,
+account you enrolled and the certificate's lifetime. It cannot mint further
+grants: the owner socket admits one uid, and `--owner-user` must not be the
+account visitors log in as — the installer refuses to finish otherwise, and
+checks by trying it. If that account has `sudo`,
 so does your visitor — that is your machine's existing policy, not something
 grantd grants.
 
@@ -351,8 +361,19 @@ SSH never depended on it. No new grants can be redeemed until it returns.
 retry path inside the transaction that makes grants single-use, and that is the
 one function where a mistake means two keys get access. Grants are free to mint.
 
-**Is the certificate revocable?** No. It expires. Keep TTLs short — that is the
-design, not a limitation to work around.
+**Is the certificate revocable?** Not as a certificate — there is no CRL and
+nothing to publish. What you can do is revoke the grant, which stops any
+further redemption and makes the reaper close sessions running under it within
+about fifteen seconds. Keep TTLs short: that is still the design.
+
+**Does the deadline end an open session?** Yes, but not by itself. sshd checks
+a certificate when it authenticates, so expiry alone stops new connections and
+leaves a running session alone — that is OpenSSH's behaviour, not something
+grantd chose. A `grantd-reaper` timer closes the gap: every fifteen seconds it
+asks the signer which grants are done, matches them against the certificate ids
+sshd logged at authentication, and signals those sessions. It only ever signals
+a process sshd recorded as holding a grantd certificate, so an operator's own
+session is never in scope.
 
 ## Status
 

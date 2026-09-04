@@ -39,7 +39,9 @@ vm()  { limactl shell "$VM" -- bash -c "$1"; }
 vmq() { limactl shell "$VM" -- bash -c "$1" 2>/dev/null; }
 # As the enrolled owner. Lima logs in as a different account, and root cannot
 # traverse the setgid socket directory either.
-owner() { limactl shell "$VM" -- sudo -u "$SSH_USER" sh -c "$1"; }
+# The owner is root, not $SSH_USER: an account that can both receive access
+# and mint it can extend its own deadline.
+owner() { limactl shell "$VM" -- sudo sh -c "$1"; }
 
 command -v limactl >/dev/null || { echo "limactl not found; brew install lima" >&2; exit 1; }
 limactl list --format '{{.Name}} {{.Status}}' | grep -q "^$VM Running" \

@@ -75,6 +75,8 @@ func main() {
 		err = cmdServe(os.Args[2:], log)
 	case "status":
 		err = cmdStatus(os.Args[2:])
+	case "expired-grants":
+		err = cmdExpiredGrants(os.Args[2:])
 	case "destroy":
 		err = cmdDestroy(os.Args[2:], log)
 	case "-h", "--help", "help":
@@ -97,6 +99,7 @@ func usage() {
                        [--ssh-host-key-file /etc/ssh/ssh_host_ed25519_key.pub]
   grant-signer serve   [--owner-uid N] [--daemon-uid N]
   grant-signer status
+  grant-signer expired-grants
   grant-signer destroy --yes
 
 Common flags: --key-dir, --state, --owner-sock, --daemon-sock
@@ -402,6 +405,41 @@ func listen(path string, mode os.FileMode, uid, gid int, log *slog.Logger, which
 }
 
 // ---------------------------------------------------------------------- status
+
+// cmdExpiredGrants prints the id of every grant whose window has closed, one
+// per line.
+//
+// It exists for the session reaper. A certificate's expiry stops a *new*
+// connection, because sshd checks validity when it authenticates — it does
+// nothing to a session already open, which then outlives the deadline it was
+// issued under. The reaper closes those, and it needs to know which grants
+// are done without parsing JSON on the host.
+//
+// Revoked counts as expired: revoking a grant should end its session too.
+func cmdExpiredGrants(args []string) error {
+	fs := flag.NewFlagSet("expired-grants", flag.ExitOnError)
+	var p paths
+	p.bind(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	s, err := signer.Open(p.signerConfig())
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	grants, err := s.ListGrants(context.Background())
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	for _, g := range grants {
+		if g.ExpiresAt <= now || g.RevokedAt != nil {
+			fmt.Println(g.ID)
+		}
+	}
+	return nil
+}
 
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)

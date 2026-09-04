@@ -9,7 +9,9 @@
 export function docsMarkdown(origin: string): string {
   return `# grantd
 
-Temporary, single-use SSH access for agents.
+Temporary SSH access for agents. A capability is redeemed once; the
+certificate it issues is time-bounded, and the host closes sessions that
+outlive it.
 
 This service is a **router**. It never holds an SSH CA private key, a host
 identity private key, a grant secret, or a visiting agent's SSH private key.
@@ -193,7 +195,8 @@ Notes.
   your own request is refused as a replayed nonce. If you lose the response, ask
   for another URL — grants are free to mint.
 
-  The certificate expires when the grant does. There is no renewal.
+  The certificate expires when the grant does. There is no renewal, and the
+  host closes any session still open when it expires.
 
   If you get HOST_OFFLINE, the machine is not currently connected. The grant is
   still valid until it expires; try again.

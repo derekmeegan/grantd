@@ -159,7 +159,7 @@ ADVERTISED="$(curl -s "$ORIGIN/v1/hosts/$HOST_ID" | sed -n 's/.*"hostname"[[:spa
   || bad "advertised address is $ADVERTISED, expected $REMOTE_ADDR"
 
 step "a capability crosses the internet and becomes a session"
-URL="$(rsh "sudo -u $SSH_USER curl -s --unix-socket /run/grantd/owner/owner.sock \
+URL="$(rsh "sudo curl -s --unix-socket /run/grantd/owner/owner.sock \
         -X POST http://localhost/grants -H 'content-type: application/json' \
         -d '{\"ttl_seconds\":900}'" \
       | sed -n 's/.*"capability_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"

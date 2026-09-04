@@ -14,6 +14,7 @@ VERSION="${GRANTD_VERSION:-}"
 ORIGIN=""
 PUBLIC_ORIGIN=""
 SSH_USER=""
+OWNER_USER=""
 ADVERTISE_HOST=""
 DNS_SUFFIX=""
 ADVERTISE_PORT="22"
@@ -72,6 +73,10 @@ Required:
                        The record is never proxied.
 
 Options:
+  --owner-user ACCOUNT who may mint grants through the owner socket. Must not
+                       be --ssh-user: an account that can both receive access
+                       and create it can extend its own stay and delegate to
+                       others. Defaults to the account running sudo, or root.
   --public-origin URL  origin to embed in capability URLs (default: --origin)
   --port N             SSH port to advertise (default 22)
   --listen-port N      also make sshd listen on N, and advertise N. Use 443 for
@@ -115,6 +120,7 @@ while [ $# -gt 0 ]; do
     --origin) ORIGIN="$2"; shift 2 ;;
     --public-origin) PUBLIC_ORIGIN="$2"; shift 2 ;;
     --ssh-user) SSH_USER="$2"; shift 2 ;;
+    --owner-user) OWNER_USER="$2"; shift 2 ;;
     --hostname) ADVERTISE_HOST="$2"; shift 2 ;;
     --dns-suffix) DNS_SUFFIX="$2"; shift 2 ;;
     --port) ADVERTISE_PORT="$2"; shift 2 ;;
@@ -150,8 +156,34 @@ fi
 id -u "$SSH_USER" >/dev/null 2>&1 || die "no such account: $SSH_USER"
 SSH_USER="$(id -un "$SSH_USER")"
 [ "$(id -u "$SSH_USER")" -ne 0 ] || die "refusing to enroll root; choose an unprivileged account"
-OWNER_UID="$(id -u "$SSH_USER")"
-OWNER_GID="$(id -g "$SSH_USER")"
+# Who may mint grants. This must not be the visiting account.
+#
+# The owner socket's only guard is the uid the kernel reports through
+# SO_PEERCRED, which is sound — but it is pointed at whatever uid this sets.
+# Pointing it at the visitor made a visiting agent able to mint itself a fresh
+# grant, extend past its own deadline, and hand a capability URL to someone
+# else entirely. "Keep TTLs short" is not a mitigation when the guest can
+# write the TTL.
+if [ -z "$OWNER_USER" ]; then
+  # The human who ran sudo is the natural owner. Falling back to root keeps a
+  # non-sudo install working, and root can already do everything anyway.
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "$SSH_USER" ]; then
+    OWNER_USER="$SUDO_USER"
+  else
+    OWNER_USER=root
+  fi
+fi
+id -u "$OWNER_USER" >/dev/null 2>&1 || die "no such account: $OWNER_USER"
+OWNER_USER="$(id -un "$OWNER_USER")"
+if [ "$(id -u "$OWNER_USER")" -eq "$(id -u "$SSH_USER")" ]; then
+  die "--owner-user and --ssh-user must be different accounts.
+  A visiting agent logs in as $SSH_USER. If that account also owns the grant
+  socket, the visitor can mint itself further grants, outlive the deadline it
+  was given, and pass a capability URL to a third party.
+  Pass --owner-user with your own account, or leave it unset to use root."
+fi
+OWNER_UID="$(id -u "$OWNER_USER")"
+OWNER_GID="$(id -g "$OWNER_USER")"
 
 command -v systemctl >/dev/null 2>&1 || die "grantd v1 requires systemd"
 SSHD="$(find_sshd)" || die "could not find sshd"
@@ -409,6 +441,14 @@ for b in grantd grant-signer; do
   track_file "$LIBDIR/$b"
   install -m 0755 "$STAGE/$b" "$LIBDIR/$b"
 done
+
+# The session reaper, from the single copy in install/ that the service
+# serves — the same pattern as redeem.sh, so the script that runs here is the
+# one the test suite exercises.
+track_file "$LIBDIR/reap-sessions.sh"
+"${CURL[@]}" "${ORIGIN%/}/reap-sessions.sh" -o "$WORK/reap-sessions.sh" \
+  || die "could not fetch reap-sessions.sh from ${ORIGIN%/}"
+install -m 0755 "$WORK/reap-sessions.sh" "$LIBDIR/reap-sessions.sh"
 
 ensure_dir 0700 grantsigner grantsigner "$CONFDIR"
 ensure_dir 0700 grantsigner grantsigner "$STATEDIR"
@@ -721,9 +761,48 @@ UMask=0077
 WantedBy=multi-user.target
 GRANTD_UNIT
 
-chmod 0644 "$SIGNER_UNIT" "$DAEMON_UNIT"
+# A certificate's expiry stops a new connection but not an open session. This
+# closes the ones that outlive their grant, which is what a deadline is read
+# as meaning.
+REAPER_UNIT=/etc/systemd/system/grantd-reaper.service
+REAPER_TIMER=/etc/systemd/system/grantd-reaper.timer
+track_file "$REAPER_UNIT"
+track_file "$REAPER_TIMER"
+undo "systemctl disable --now grantd-reaper.timer"
+
+cat > "$REAPER_UNIT" <<REAPER_UNIT_EOF
+[Unit]
+Description=grantd session reaper (close sessions whose grant has expired)
+Documentation=https://github.com/derekmeegan/grantd
+
+[Service]
+Type=oneshot
+# Root, because it signals sshd session processes and reads the signer state
+# through runuser. It sends one signal to processes sshd itself recorded as
+# holding a grantd certificate, and does nothing else.
+ExecStart=$LIBDIR/reap-sessions.sh $SSH_USER
+REAPER_UNIT_EOF
+
+cat > "$REAPER_TIMER" <<REAPER_TIMER_EOF
+[Unit]
+Description=grantd session reaper
+
+[Timer]
+OnBootSec=30s
+# Fine enough that an expired session ends promptly, coarse enough to cost
+# nothing. The grant minimum is 60s.
+OnUnitActiveSec=15s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+REAPER_TIMER_EOF
+
+chmod 0644 "$SIGNER_UNIT" "$DAEMON_UNIT" "$REAPER_UNIT" "$REAPER_TIMER"
 systemctl daemon-reload
 systemctl enable grant-signer.service grantd.service >/dev/null
+systemctl enable --now grantd-reaper.timer >/dev/null 2>&1 \
+  || warn "the session reaper timer did not start; sessions will outlive their grants"
 # restart, not start: on a re-install the running services must pick up the
 # new binaries.
 systemctl restart grant-signer.service
@@ -738,9 +817,17 @@ for _ in $(seq 1 40); do
 done
 [ -S "$OWNER_SOCK" ] || die "signer did not create its owner socket"
 
-if ! runuser -u "$SSH_USER" -- curl -sf --unix-socket "$OWNER_SOCK" \
+if ! runuser -u "$OWNER_USER" -- curl -sf --unix-socket "$OWNER_SOCK" \
       http://localhost/status >"$WORK/status.json" 2>/dev/null; then
-  warn "could not read status through the owner socket as $SSH_USER"
+  warn "could not read status through the owner socket as $OWNER_USER"
+fi
+
+# The separation above is the point, so it is verified rather than assumed.
+if runuser -u "$SSH_USER" -- curl -sf --unix-socket "$OWNER_SOCK" \
+      -X POST http://localhost/grants -H 'content-type: application/json' \
+      -d '{"ttl_seconds":60}' >/dev/null 2>&1; then
+  die "the visiting account $SSH_USER can mint grants through the owner socket.
+  That defeats every deadline this tool issues. Refusing to finish."
 fi
 
 ONLINE=no
@@ -764,7 +851,8 @@ $(log "grantd installed")
     host key:   $(ssh-keygen -lf "$SSH_HOST_KEY_PUB" 2>/dev/null | awk '{print $2}')
     rendezvous: $ONLINE
 
-Mint a 30-minute capability as $SSH_USER:
+Mint a 30-minute capability as $OWNER_USER (not as $SSH_USER, which is the
+account visitors log in to and deliberately cannot mint):
 
     curl -s --unix-socket $OWNER_SOCK \\
       -X POST http://localhost/grants \\

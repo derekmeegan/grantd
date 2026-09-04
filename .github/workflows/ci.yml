@@ -181,7 +181,9 @@ jobs:
           done
           sudo journalctl -u grantd.service -b --no-pager | grep -q "rendezvous connected"
 
-          URL=$(sudo -u agentuser curl -s --unix-socket /run/grantd/owner/owner.sock \
+          # Minted as root, the owner. agentuser is the account visitors log
+          # in as and deliberately cannot mint; that is asserted below.
+          URL=$(sudo curl -s --unix-socket /run/grantd/owner/owner.sock \
                   -X POST http://localhost/grants -H 'content-type: application/json' \
                   -d '{"ttl_seconds":600}' \
                 | sed -n 's/.*"capability_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -201,6 +203,22 @@ jobs:
                   -o HostKeyAlias="$HOST_ID" -o HostKeyAlgorithms=ssh-ed25519 -o BatchMode=yes \
                   -o LogLevel=ERROR -l agentuser -- 127.0.0.1 whoami)
           echo "logged in as: $OUT"
+
+          # A visitor that can mint grants can extend its own stay past the
+          # deadline it was given, and hand a capability to someone else. The
+          # owner socket admits one uid and it is not this one.
+          if sudo -u agentuser curl -sf --unix-socket /run/grantd/owner/owner.sock \
+               -X POST http://localhost/grants -H 'content-type: application/json' \
+               -d '{"ttl_seconds":60}' >/dev/null 2>&1; then
+            echo "the visiting account minted a grant; the deadline means nothing" >&2
+            exit 1
+          fi
+          echo "the visiting account cannot mint grants"
+
+          # The certificate bounds new connections. The reaper is what ends a
+          # session already open, so it must actually be running.
+          systemctl is-active --quiet grantd-reaper.timer
+          echo "session reaper is armed"
           test "$OUT" = "agentuser"
 
       - name: the shell client agrees with the frozen vectors, in both locales

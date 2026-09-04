@@ -22,8 +22,8 @@ ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 dsh()  { docker exec "$CONTAINER" bash -c "$1"; }
-# As the enrolled owner. Root is not in the owner's group and cannot traverse
-# the setgid socket directory, so these commands fail as root.
+# As the visiting account. It logs in over SSH and deliberately cannot mint:
+# minting is root's, through dsh.
 duser(){ docker exec -u ubuntu "$CONTAINER" sh -c "$1"; }
 
 WORK="$(mktemp -d)"
@@ -234,7 +234,7 @@ check_mode /etc/grantd                 "700 grantsigner:grantsigner" "key direct
 check_mode /etc/grantd/ssh_ca          "600 grantsigner:grantsigner" "SSH CA private key is 0600"
 check_mode /etc/grantd/host_identity   "600 grantsigner:grantsigner" "host identity key is 0600"
 check_mode /var/lib/grant-signer       "700 grantsigner:grantsigner" "state directory is private"
-check_mode /run/grantd/owner           "2770 grantsigner:ubuntu"     "owner socket directory is setgid to the owner"
+check_mode /run/grantd/owner           "2770 grantsigner:root"      "owner socket directory is setgid to the owner"
 check_mode /run/grantd/redeem          "2770 grantsigner:grantd"     "daemon socket directory is setgid to the daemon"
 check_mode /etc/ssh/grantd_user_ca.pub "644 root:root"               "CA public key is world readable"
 
@@ -276,14 +276,30 @@ fi
 step "end to end through the installed system"
 # Exactly the commands the installer prints, with no grantd client binary.
 # If the documented path stops working, this fails.
-URL=$(duser "curl -s --unix-socket /run/grantd/owner/owner.sock \
+URL=$(dsh "curl -s --unix-socket /run/grantd/owner/owner.sock \
              -X POST http://localhost/grants -H 'content-type: application/json' \
              -d '{\"ttl_seconds\":600}' \
            | sed -n 's/.*\"capability_url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p'" || true)
 case "$URL" in
-  http*) ok "ubuntu can mint a capability with curl over the owner socket" ;;
+  http*) ok "root can mint a capability with curl over the owner socket" ;;
   *) bad "minting failed: $URL" ;;
 esac
+
+# The visiting account must not be able to do what root just did. If it can,
+# every deadline this tool issues is advisory: the guest writes its own.
+if duser "curl -sf --unix-socket /run/grantd/owner/owner.sock \
+          -X POST http://localhost/grants -H 'content-type: application/json' \
+          -d '{\"ttl_seconds\":60}'" >/dev/null 2>&1; then
+  bad "the visiting account ubuntu can mint grants through the owner socket"
+else
+  ok "the visiting account cannot mint grants"
+fi
+
+if dsh "systemctl is-active --quiet grantd-reaper.timer"; then
+  ok "session reaper timer is armed"
+else
+  bad "session reaper timer is not running; sessions outlive their grants"
+fi
 
 if [ -n "$URL" ]; then
   sleep 4
