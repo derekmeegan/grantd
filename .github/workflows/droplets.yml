@@ -1,0 +1,101 @@
+name: droplets
+
+# End to end on two real machines: a host droplet in one region and a visitor
+# droplet in another, both created for the run and destroyed at the end. The
+# visitor redeems a capability with nothing but curl, openssl and ssh, then
+# opens a direct SSH session to the host's public address. Nothing in this
+# job is the visitor or the host; the runner only drives them.
+#
+# Unlike `native-amd64` in ci.yml, this installs the binaries built from the
+# checkout, so it can test a branch before anything is released. It still
+# needs the coordination service at `origin`, which is deployed by hand, so
+# like the other deployed-infrastructure suites it runs on demand and not on
+# every push. Choose the branch when dispatching it.
+#
+# Requires a DIGITALOCEAN_TOKEN repository secret with write access to
+# droplets and SSH keys. Droplets are tagged grantd-test-run-<run id>; the
+# last step sweeps that tag even when the job is cancelled, so a runner that
+# dies mid-test cannot leave a public SSH server behind.
+
+on:
+  workflow_dispatch:
+    inputs:
+      origin:
+        description: coordination service to test against
+        required: false
+        default: https://api.grantd.dev
+      version:
+        description: published release to install instead of the checkout (leave empty to test the checkout)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# One pair of droplets at a time. A second dispatch queues behind the first
+# rather than doubling the bill or racing it for the same account.
+concurrency:
+  group: droplets
+  cancel-in-progress: false
+
+env:
+  DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+  RUN_TAG: grantd-test-run-${{ github.run_id }}
+
+jobs:
+  two-droplets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: the token is configured
+        run: |
+          if [ -z "$DIGITALOCEAN_TOKEN" ]; then
+            echo "::error::DIGITALOCEAN_TOKEN is not set; add it as a repository secret" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: github.event.inputs.version == ''
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      - name: build the checkout for linux/amd64
+        if: github.event.inputs.version == ''
+        working-directory: go
+        # The same flags the release builder uses. Droplets are amd64
+        # whatever the runner is.
+        run: |
+          set -eu
+          mkdir -p ../bin
+          for c in grantd grant-signer; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -trimpath -ldflags "-s -w" -o "../bin/$c" "./cmd/$c"
+          done
+          ls -l ../bin
+
+      - name: two droplets, host and visitor, end to end
+        run: |
+          set -eu
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            SOURCE="--version ${{ github.event.inputs.version }}"
+          else
+            SOURCE="--local-dir $PWD/bin"
+          fi
+          tests/remote/digitalocean.sh --origin "${{ github.event.inputs.origin }}" $SOURCE
+
+      - name: sweep anything tagged with this run
+        if: always()
+        # The script tears down on every exit path it controls. A runner that
+        # is cancelled or dies does not run traps, so this deletes by tag as
+        # well, and removes the SSH key the run uploaded.
+        run: |
+          set -u
+          api() { curl -sS -X "$1" "https://api.digitalocean.com/v2$2" -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" --max-time 60; }
+          api DELETE "/droplets?tag_name=$RUN_TAG" >/dev/null || true
+          api GET "/account/keys?per_page=200" \
+            | python3 -c "import json,sys; [print(k['id']) for k in json.load(sys.stdin).get('ssh_keys',[]) if k['name'].startswith('$RUN_TAG')]" \
+            | while read -r id; do api DELETE "/account/keys/$id" >/dev/null || true; done
+          echo "swept $RUN_TAG"

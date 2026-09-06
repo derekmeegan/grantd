@@ -318,9 +318,10 @@ be one.
 | `tests/install/run.sh` | Docker + systemd | install, sandbox, uninstall, SSH survival |
 | `tests/install/release.sh` | Docker + systemd | install from signed artifacts; tampered and wrongly-signed releases |
 | `tests/vm/run.sh` | Lima VM, Ubuntu LTS | **reboot**, unprivileged sandbox, host offline and back |
-| `tests/remote/run.sh` | a host you supply | a real network path between visitor and host |
-| `tests/remote/digitalocean.sh` | throwaway droplet | the above, provisioned and destroyed automatically |
+| `tests/remote/run.sh` | a host you supply, optionally a visitor too | a real network path between visitor and host; a session ended at its deadline and on revocation |
+| `tests/remote/digitalocean.sh` | two throwaway droplets | the above between two machines that have never met, provisioned and destroyed automatically |
 | `.github/workflows/ci.yml` | real amd64 VM | the installer run natively; the systemd sandbox on amd64 |
+| `.github/workflows/droplets.yml` | two droplets, from CI | the checkout's binaries, host in one region and visitor in another |
 
 The protocol has three independent implementations — Go, TypeScript, POSIX
 shell — and all three are checked against the same frozen vectors rather than
@@ -336,7 +337,19 @@ precisely that Cloudflare is *not* in the path.
 DIGITALOCEAN_TOKEN=dop_v1_... tests/remote/digitalocean.sh
 ```
 
-About a cent, about five minutes, destroys everything on any exit path.
+Two droplets, about two cents, about ten minutes, destroys everything on any
+exit path. The host is in one region and the visitor in another, so the session
+under test is a stranger's SSH connection across the internet, and neither end
+is the machine running the script. It also holds a session open past its
+grant's deadline and checks the host ends it, and the process it was running,
+within the documented bound while a session under another grant survives.
+
+The same suite runs from GitHub Actions as the `droplets` workflow, on
+`workflow_dispatch` against whichever branch is chosen. It builds the checkout
+and installs those binaries with `--local-dir`, so it tests unreleased code; it
+needs a `DIGITALOCEAN_TOKEN` repository secret. Pass a `version` to install a
+published release instead. Droplets are tagged with the run id and swept by
+tag when the job ends, even if it was cancelled.
 
 ## FAQ
 

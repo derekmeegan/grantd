@@ -25,6 +25,8 @@ OWNER_SOCK=/run/grantd/owner/owner.sock
 DAEMON_SOCK=/run/grantd/redeem/redeem.sock
 SIGNER_UNIT=/etc/systemd/system/grant-signer.service
 DAEMON_UNIT=/etc/systemd/system/grantd.service
+REAPER_UNIT=/etc/systemd/system/grantd-reaper.service
+REAPER_TIMER=/etc/systemd/system/grantd-reaper.timer
 
 # ------------------------------------------------------------------- helpers
 
@@ -90,9 +92,13 @@ fi
 # ------------------------------------------------------------------ services
 
 log "stopping services"
+# The reaper timer first. Left armed with its script gone, it would fail
+# every fifteen seconds for the life of the machine.
+systemctl disable --now grantd-reaper.timer 2>/dev/null || true
+systemctl stop grantd-reaper.service 2>/dev/null || true
 systemctl disable --now grantd.service 2>/dev/null || true
 systemctl disable --now grant-signer.service 2>/dev/null || true
-rm -f "$DAEMON_UNIT" "$SIGNER_UNIT"
+rm -f "$DAEMON_UNIT" "$SIGNER_UNIT" "$REAPER_UNIT" "$REAPER_TIMER"
 systemctl daemon-reload 2>/dev/null || true
 
 # ----------------------------------------------------------------- SSH trust

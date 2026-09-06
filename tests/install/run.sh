@@ -57,6 +57,8 @@ assert_nothing_installed() {
   assert_absent /etc/grantd.conf "public configuration removed"
   assert_absent /etc/systemd/system/grant-signer.service "signer unit removed"
   assert_absent /etc/systemd/system/grantd.service "daemon unit removed"
+  assert_absent /etc/systemd/system/grantd-reaper.service "reaper unit removed"
+  assert_absent /etc/systemd/system/grantd-reaper.timer "reaper timer removed"
   assert_absent /run/grantd "runtime directory removed"
   assert_no_account grantd
   assert_no_account grantsigner

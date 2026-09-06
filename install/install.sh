@@ -444,10 +444,15 @@ done
 
 # The session reaper, from the single copy in install/ that the service
 # serves — the same pattern as redeem.sh, so the script that runs here is the
-# one the test suite exercises.
+# one the test suite exercises. A --local-dir that carries its own copy wins,
+# so a checkout can be tested before it is deployed.
 track_file "$LIBDIR/reap-sessions.sh"
-"${CURL[@]}" "${ORIGIN%/}/reap-sessions.sh" -o "$WORK/reap-sessions.sh" \
-  || die "could not fetch reap-sessions.sh from ${ORIGIN%/}"
+if [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/reap-sessions.sh" ]; then
+  cp "$LOCAL_DIR/reap-sessions.sh" "$WORK/reap-sessions.sh"
+else
+  "${CURL[@]}" "${ORIGIN%/}/reap-sessions.sh" -o "$WORK/reap-sessions.sh" \
+    || die "could not fetch reap-sessions.sh from ${ORIGIN%/}"
+fi
 install -m 0755 "$WORK/reap-sessions.sh" "$LIBDIR/reap-sessions.sh"
 
 ensure_dir 0700 grantsigner grantsigner "$CONFDIR"
