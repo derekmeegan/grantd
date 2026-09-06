@@ -188,6 +188,19 @@ OWNER_GID="$(id -g "$OWNER_USER")"
 command -v systemctl >/dev/null 2>&1 || die "grantd v1 requires systemd"
 SSHD="$(find_sshd)" || die "could not find sshd"
 
+# Enforcement mode requires a host that can actually contain a process for the
+# life of its grant. Refuse rather than silently fall back to a best-effort
+# reaper. Each of these is what the lifetime supervisor depends on.
+[ -e /sys/fs/cgroup/cgroup.controllers ] \
+  || die "grantd requires the cgroup v2 unified hierarchy, which this host does not present at /sys/fs/cgroup"
+[ -e /sys/fs/cgroup/init.scope/cgroup.kill ] \
+  || die "grantd requires cgroup.kill (Linux 5.14+); this kernel is too old to terminate a grant's processes atomically"
+SD_VERSION="$(systemctl --version 2>/dev/null | awk 'NR==1{print $2}' | tr -cd '0-9')"
+[ -n "$SD_VERSION" ] && [ "$SD_VERSION" -ge 244 ] 2>/dev/null \
+  || die "grantd requires systemd 244 or newer for RuntimeMaxSec on transient scopes (found ${SD_VERSION:-unknown})"
+[ -f /etc/pam.d/sshd ] \
+  || die "grantd requires PAM session support in sshd (/etc/pam.d/sshd is missing)"
+
 # A visiting agent in a locked-down sandbox often reaches port 443 and nothing
 # else. --listen-port adds a listener there without disturbing the existing
 # ones, so the operator's own access on port 22 keeps working.
@@ -344,7 +357,7 @@ mkdir -p "$STAGE"
 
 stage_local() {
   log "installing from $LOCAL_DIR"
-  for b in grantd grant-signer; do
+  for b in grantd grant-signer grant-warden grant-admit; do
     [ -f "$LOCAL_DIR/$b" ] || die "missing binary: $LOCAL_DIR/$b"
     cp "$LOCAL_DIR/$b" "$STAGE/$b"
   done
@@ -370,7 +383,8 @@ resolve_version() {
 
 download_release() {
   log "downloading grantd $VERSION (linux/$ARCH)"
-  for f in "grantd-linux-$ARCH" "grant-signer-linux-$ARCH" VERSION SHA256SUMS SHA256SUMS.sig; do
+  for f in "grantd-linux-$ARCH" "grant-signer-linux-$ARCH" "grant-warden-linux-$ARCH" \
+           "grant-admit-linux-$ARCH" VERSION SHA256SUMS SHA256SUMS.sig; do
     fetch "$RELEASES_URL/$VERSION/$f" "$STAGE/$f" || die "could not download $f"
   done
 }
@@ -390,7 +404,8 @@ verify_signature() {
 verify_hashes() {
   log "verifying artifact hashes"
   : > "$STAGE/verify.txt"
-  for f in "grantd-linux-$ARCH" "grant-signer-linux-$ARCH" VERSION; do
+  for f in "grantd-linux-$ARCH" "grant-signer-linux-$ARCH" "grant-warden-linux-$ARCH" \
+           "grant-admit-linux-$ARCH" VERSION; do
     n="$(grep -cE "^[0-9a-f]{64}  $f\$" "$STAGE/SHA256SUMS" || true)"
     [ "$n" -eq 1 ] || die "signed SHA256SUMS lists $f $n times; expected exactly once"
     grep -E "^[0-9a-f]{64}  $f\$" "$STAGE/SHA256SUMS" >> "$STAGE/verify.txt"
@@ -419,41 +434,37 @@ else
   verify_version
   cp "$STAGE/grantd-linux-$ARCH" "$STAGE/grantd"
   cp "$STAGE/grant-signer-linux-$ARCH" "$STAGE/grant-signer"
+  cp "$STAGE/grant-warden-linux-$ARCH" "$STAGE/grant-warden"
+  cp "$STAGE/grant-admit-linux-$ARCH" "$STAGE/grant-admit"
 fi
-chmod 0755 "$STAGE/grantd" "$STAGE/grant-signer"
+chmod 0755 "$STAGE/grantd" "$STAGE/grant-signer" "$STAGE/grant-warden" "$STAGE/grant-admit"
 
 # ------------------------------------------------------------------ accounts
 
 log "creating service accounts"
 ensure_group grantsigner
 ensure_group grantd
+ensure_group grantadmit
 ensure_user grantsigner
 ensure_user grantd
+ensure_user grantadmit
 
 DAEMON_UID="$(id -u grantd)"
 DAEMON_GID="$(getent group grantd | cut -d: -f3)"
+# sshd runs the admission command (AuthorizedPrincipalsCommand) as this
+# account. It holds no privilege of its own; it only relays what sshd verified
+# to the root supervisor over a socket its group can reach.
+ADMIT_UID="$(id -u grantadmit)"
+ADMIT_GID="$(getent group grantadmit | cut -d: -f3)"
 
 # ---------------------------------------------------------------- filesystem
 
 log "installing binaries and state directories"
 ensure_dir 0755 root root "$LIBDIR"
-for b in grantd grant-signer; do
+for b in grantd grant-signer grant-warden grant-admit; do
   track_file "$LIBDIR/$b"
   install -m 0755 "$STAGE/$b" "$LIBDIR/$b"
 done
-
-# The session reaper, from the single copy in install/ that the service
-# serves — the same pattern as redeem.sh, so the script that runs here is the
-# one the test suite exercises. A --local-dir that carries its own copy wins,
-# so a checkout can be tested before it is deployed.
-track_file "$LIBDIR/reap-sessions.sh"
-if [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/reap-sessions.sh" ]; then
-  cp "$LOCAL_DIR/reap-sessions.sh" "$WORK/reap-sessions.sh"
-else
-  "${CURL[@]}" "${ORIGIN%/}/reap-sessions.sh" -o "$WORK/reap-sessions.sh" \
-    || die "could not fetch reap-sessions.sh from ${ORIGIN%/}"
-fi
-install -m 0755 "$WORK/reap-sessions.sh" "$LIBDIR/reap-sessions.sh"
 
 ensure_dir 0700 grantsigner grantsigner "$CONFDIR"
 ensure_dir 0700 grantsigner grantsigner "$STATEDIR"
@@ -467,6 +478,8 @@ cat > "$TMPFILES" <<TMPF
 d $RUNDIR 0755 root root -
 d $RUNDIR/owner 2770 grantsigner $OWNER_GID -
 d $RUNDIR/redeem 2770 grantsigner $DAEMON_GID -
+d $RUNDIR/lifetime 0700 grantsigner grantsigner -
+d $RUNDIR/warden 2750 root $ADMIT_GID -
 TMPF
 [ -d "$RUNDIR" ] || undo "rm -rf '$RUNDIR'"
 systemd-tmpfiles --create "$TMPFILES"
@@ -547,7 +560,36 @@ cat > "$SSHD_SNIPPET" <<CONF
 # Trusts certificates issued by this machine's own CA. The CA private key is
 # held by the grantsigner account and never leaves this machine.
 TrustedUserCAKeys $CA_PUB
+
+# Admission. For every certificate this CA verified, sshd asks grant-admit
+# which principals to allow. grant-admit reads the grant id from the
+# certificate sshd verified — never from a client value — checks it against the
+# signer's deadline and revocation state through the supervisor, and returns
+# the enrolled principal only if the grant is open. It runs as an unprivileged
+# account of its own. The PAM session hook (in /etc/pam.d/sshd) then places the
+# admitted session into the grant's cgroup before any visitor code runs.
+UsePAM yes
+AuthorizedPrincipalsCommand $LIBDIR/grant-admit principals %u %t %k
+AuthorizedPrincipalsCommandUser grantadmit
 CONF
+
+# The PAM session hook that attaches an admitted session to its grant's cgroup.
+# It is gated to the enrolled visitor account, so an operator logging into any
+# other account never runs it: pam_succeed_if skips the pam_exec line unless
+# the session is for $SSH_USER. For $SSH_USER — reachable only with a grantd
+# certificate — pam_exec runs grant-admit as root before the shell starts, and
+# a non-zero exit fails the session, so a visitor is never placed outside its
+# containment.
+PAM_SSHD=/etc/pam.d/sshd
+track_file "$PAM_SSHD"
+if ! grep -q 'grant-admit attach' "$PAM_SSHD"; then
+  cat >> "$PAM_SSHD" <<PAM_EOF
+
+# grantd: contain the enrolled visitor account's sessions. Remove with uninstall.sh.
+session [success=ignore default=1] pam_succeed_if.so quiet user = $SSH_USER
+session required pam_exec.so $LIBDIR/grant-admit attach
+PAM_EOF
+fi
 
 # Adding a listener means naming every port, because a Port directive replaces
 # the default rather than adding to it. Read the ports sshd uses now and write
@@ -665,7 +707,10 @@ ExecStart=/usr/local/lib/grantd/grant-signer serve \
     --owner-uid ${GRANTD_OWNER_UID} \
     --owner-gid ${GRANTD_OWNER_GID} \
     --daemon-uid ${GRANTD_DAEMON_UID} \
-    --daemon-gid ${GRANTD_DAEMON_GID}
+    --daemon-gid ${GRANTD_DAEMON_GID} \
+    --lifetime-sock /run/grantd/lifetime/lifetime.sock \
+    --lifetime-uid 0 \
+    --lifetime-gid 0
 EnvironmentFile=/etc/grantd/signer.env
 
 Restart=always
@@ -766,52 +811,73 @@ UMask=0077
 WantedBy=multi-user.target
 GRANTD_UNIT
 
-# A certificate's expiry stops a new connection but not an open session. This
-# closes the ones that outlive their grant, which is what a deadline is read
-# as meaning.
-REAPER_UNIT=/etc/systemd/system/grantd-reaper.service
-REAPER_TIMER=/etc/systemd/system/grantd-reaper.timer
-track_file "$REAPER_UNIT"
-track_file "$REAPER_TIMER"
-undo "systemctl disable --now grantd-reaper.timer"
-
-cat > "$REAPER_UNIT" <<REAPER_UNIT_EOF
+# The parent slice carries the resource limits shared by every visitor. Each
+# grant gets a transient child slice under it, so no one grant can exhaust
+# memory, process slots, or CPU for the host, the supervisor, or another grant.
+SLICE_UNIT=/etc/systemd/system/grantd.slice
+track_file "$SLICE_UNIT"
+cat > "$SLICE_UNIT" <<'GRANTD_SLICE'
 [Unit]
-Description=grantd session reaper (close sessions whose grant has expired)
+Description=grantd visitor containment
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=80%
+TasksAccounting=yes
+TasksMax=4096
+CPUAccounting=yes
+CPUWeight=50
+GRANTD_SLICE
+
+# The lifetime supervisor. It runs as root, so it can place a visitor's session
+# into a root-owned cgroup and drive systemd, and it holds no key material, so a
+# compromise leaks nothing. It reads grant deadlines from the signer's
+# read-only lifetime socket and enforces them by emptying each grant's cgroup.
+WARDEN_UNIT=/etc/systemd/system/grant-warden.service
+track_unit grant-warden.service "$WARDEN_UNIT"
+cat > "$WARDEN_UNIT" <<WARDEN_UNIT_EOF
+[Unit]
+Description=grantd lifetime supervisor
 Documentation=https://github.com/derekmeegan/grantd
+After=grant-signer.service
+Requires=grant-signer.service
 
 [Service]
-Type=oneshot
-# Root, because it signals sshd session processes and reads the signer state
-# through runuser. It sends one signal to processes sshd itself recorded as
-# holding a grantd certificate, and does nothing else.
-ExecStart=$LIBDIR/reap-sessions.sh $SSH_USER
-REAPER_UNIT_EOF
+Type=simple
+ExecStart=$LIBDIR/grant-warden \\
+    --ssh-user $SSH_USER \\
+    --admit-uid $ADMIT_UID \\
+    --admit-gid $ADMIT_GID \\
+    --admit-sock $RUNDIR/warden/admit.sock \\
+    --lifetime-sock $RUNDIR/lifetime/lifetime.sock \\
+    --slice grantd.slice \\
+    --state $RUNDIR/warden/state.json
+Restart=always
+RestartSec=2
 
-cat > "$REAPER_TIMER" <<REAPER_TIMER_EOF
-[Unit]
-Description=grantd session reaper
-
-[Timer]
-OnBootSec=30s
-# Fine enough that an expired session ends promptly, coarse enough to cost
-# nothing. The grant minimum is 60s.
-OnUnitActiveSec=15s
-AccuracySec=1s
+# It must reach systemd and read every process's cgroup, so it is not confined
+# the way the keyless network daemon is. It still gets no home, a private tmp,
+# and no view of the key material it never needs.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+InaccessiblePaths=/etc/grantd /var/lib/grant-signer
 
 [Install]
-WantedBy=timers.target
-REAPER_TIMER_EOF
+WantedBy=multi-user.target
+WARDEN_UNIT_EOF
 
-chmod 0644 "$SIGNER_UNIT" "$DAEMON_UNIT" "$REAPER_UNIT" "$REAPER_TIMER"
+chmod 0644 "$SIGNER_UNIT" "$DAEMON_UNIT" "$SLICE_UNIT" "$WARDEN_UNIT"
 systemctl daemon-reload
-systemctl enable grant-signer.service grantd.service >/dev/null
-systemctl enable --now grantd-reaper.timer >/dev/null 2>&1 \
-  || warn "the session reaper timer did not start; sessions will outlive their grants"
+systemctl enable grant-signer.service grantd.service grant-warden.service >/dev/null
+systemctl start grantd.slice >/dev/null 2>&1 \
+  || warn "could not start grantd.slice; visitor resource limits are not in force"
 # restart, not start: on a re-install the running services must pick up the
 # new binaries.
 systemctl restart grant-signer.service
 systemctl restart grantd.service
+systemctl restart grant-warden.service
 
 # -------------------------------------------------------------------- health
 

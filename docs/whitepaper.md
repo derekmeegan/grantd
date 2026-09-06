@@ -800,18 +800,30 @@ session opened one second before expiry runs indefinitely.
 
 This is OpenSSH behaving as documented, not a defect in it; but it means an
 unaugmented deployment does not enforce what a stated interval is universally
-read as promising. A reaper closes the gap: periodically it obtains the set of
-concluded capabilities from the signer, matches them against the certificate
-`key_id` values sshd recorded at authentication (§8), and signals the
-corresponding sessions.
+read as promising. grantd closes the gap with kernel-enforced containment
+rather than log scraping.
 
-It signals only processes sshd recorded as presenting a grantd certificate, and
-re-validates process identity before doing so, so neither a recycled pid nor an
-operator's own session is in scope. Revocation, previously affecting only
-future redemptions, now also terminates a running session.
+Before any visitor code runs, a privileged supervisor outside the visitor's
+authority places the session into a root-owned cgroup v2 subtree. Two sshd
+hooks do this against the certificate sshd actually verified: an
+`AuthorizedPrincipalsCommand` reads the grant id from the verified certificate
+and checks it against the signer's deadline and revocation state; a PAM
+`session` hook, run as root before the shell, places the session's sshd process
+into a per-grant slice. Membership is inherited across `fork`, `exec`, `nohup`,
+`setsid`, and double-forking, and the tree is never delegated to the visitor,
+so a process cannot leave it. At the deadline or on revocation the supervisor
+empties the subtree with `cgroup.kill`, which is atomic over the whole tree
+including nested cgroups, verifies the group is empty before reporting cleanup
+complete, and retries tasks in uninterruptible sleep. An independent
+`RuntimeMaxSec` on each session scope bounds it even if the supervisor is gone.
+The supervisor holds no key material; it learns each deadline from the signer
+over a read-only socket. Only the one grant's subtree is targeted, so operator
+sessions and other grants are untouched. The supervisor's design, its failure
+and reconciliation behaviour, and the OpenSSH integration are specified in
+`docs/plans/002-per-grant-lifetimes.md`.
 
-The mechanism is polling, so termination is bounded by the poll interval rather
-than instantaneous (§15.3).
+Termination is bounded by the deadline plus a short grace, and revocation by
+the supervisor's poll interval plus that grace (§15.3).
 
 ---
 
@@ -912,11 +924,16 @@ restrictions and no session recording. The bound is the account and the
 interval. If that account has `sudo`, the visitor has `sudo`; `root` enrollment
 is refused, but no further scoping is attempted.
 
-### 15.3 Termination is polled
+### 15.3 Termination latency and scope
 
-Session termination (§12.2) runs on an interval, so a session may outlive its
-expiry by up to that interval. Eliminating the window requires an sshd-side
-mechanism rather than external polling.
+Session termination (§12.2) enforces the deadline within about a second and
+revocation within the supervisor's poll interval, each plus a short grace
+period before SIGKILL. It bounds **execution**: it terminates the grant's
+processes. It does not undo a visitor's persistent effects — files written,
+secrets copied, actions taken on other systems — which remain after the grant
+ends. Containment also assumes the enrolled account has no authentication path
+other than grantd certificates (for example, no writable `authorized_keys`);
+securing such paths is the operator's responsibility.
 
 ### 15.4 Revocation is not distributed
 

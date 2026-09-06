@@ -216,10 +216,11 @@ jobs:
           fi
           echo "the visiting account cannot mint grants"
 
-          # The certificate bounds new connections. The reaper is what ends a
-          # session already open, so it must actually be running.
-          systemctl is-active --quiet grantd-reaper.timer
-          echo "session reaper is armed"
+          # The certificate bounds new connections. The warden contains a running
+          # session and ends it at the deadline, so it must actually be running.
+          systemctl is-active --quiet grant-warden.service
+          test -S /run/grantd/warden/admit.sock
+          echo "lifetime supervisor is running"
           test "$OUT" = "agentuser"
 
       - name: the shell client agrees with the frozen vectors, in both locales

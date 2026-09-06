@@ -17,10 +17,10 @@
 #   * an installer failure that costs you the machine
 #   * a session that outlives its grant, ended by the host and not by the visitor
 #
-# --local-dir installs the binaries in DIR (grantd, grant-signer, and
-# reap-sessions.sh if present) instead of a published release, so the code in
-# a checkout can be tested before it is released. Build them for the host's
-# architecture first; tests/remote/digitalocean.sh does this for you.
+# --local-dir installs the binaries in DIR (grantd, grant-signer, grant-warden,
+# grant-admit) instead of a published release, so the code in a checkout can be
+# tested before it is released. Build them for the host's architecture first;
+# tests/remote/digitalocean.sh does this for you.
 #
 # READ THIS BEFORE RUNNING IT
 #
@@ -168,10 +168,8 @@ mkdir -p "$STAGE"
 cp "$REPO/install/install.sh" "$REPO/install/uninstall.sh" "$REPO/install/redeem.sh" "$STAGE/"
 if [ -n "$LOCAL_DIR" ]; then
   mkdir -p "$STAGE/bin"
-  cp "$LOCAL_DIR/grantd" "$LOCAL_DIR/grant-signer" "$STAGE/bin/"
-  # The reaper from the checkout too, or the installer fetches the deployed
-  # one and the test says nothing about the script in the tree.
-  cp "$REPO/install/reap-sessions.sh" "$STAGE/bin/"
+  cp "$LOCAL_DIR/grantd" "$LOCAL_DIR/grant-signer" \
+     "$LOCAL_DIR/grant-warden" "$LOCAL_DIR/grant-admit" "$STAGE/bin/"
 fi
 rsh 'rm -rf ~/grantd-install && mkdir -p ~/grantd-install'
 ( cd "$STAGE" && COPYFILE_DISABLE=1 tar --no-xattrs -cf - . 2>/dev/null ) \
@@ -210,17 +208,15 @@ rsh true && ok "SSH to the host still works (this command is the proof)" \
 rsudo 'sshd -t' && ok "sshd -t passes after install" || bad "sshd -t fails after install"
 rsudo 'systemctl is-active grant-signer.service >/dev/null' && ok "signer running" || bad "signer not running"
 rsudo 'systemctl is-active grantd.service >/dev/null' && ok "daemon running" || bad "daemon not running"
-# The certificate bounds new connections. The reaper is what ends a session
-# already open, so it must actually be running.
-rsudo 'systemctl is-active --quiet grantd-reaper.timer' && ok "session reaper timer is armed" \
-  || bad "session reaper timer is not running; sessions would outlive their grants"
-if [ -n "$LOCAL_DIR" ]; then
-  if rsudo "cmp -s /opt/grantd-install/bin/reap-sessions.sh /usr/local/lib/grantd/reap-sessions.sh"; then
-    ok "the installed reaper is the one from the checkout"
-  else
-    bad "the installed reaper is not the one from the checkout"
-  fi
-fi
+# The certificate bounds new connections. The warden is what contains a session
+# while it runs and ends it at the deadline, so it must actually be running.
+rsudo 'systemctl is-active --quiet grant-warden.service' && ok "lifetime supervisor is running" \
+  || bad "grant-warden.service is not running; sessions would be neither contained nor bounded"
+rsudo 'test -S /run/grantd/warden/admit.sock' && ok "the admission socket is present" \
+  || bad "the admission socket is missing"
+rsudo 'systemctl show -p ActiveState --value grantd.slice | grep -q active' \
+  && ok "the visitor containment slice is active" \
+  || bad "grantd.slice is not active"
 
 step "the host is reachable through Cloudflare from a machine that has never seen it"
 for _ in $(seq 1 30); do
@@ -289,6 +285,34 @@ held_alive() { # held_alive NAME
 }
 on_host() { # on_host SLEEP_SECONDS: number of processes on the host running that sleep
   rsh "pgrep -u $SSH_USER -f 'sleep $1\$' | wc -l" | tr -d '[:space:]'
+}
+# hold_escaping opens a session that, before it execs its own sleep, launches
+# three detached processes a process-name reaper would miss: one under setsid,
+# one under nohup, and one double-forked out of a subshell. All four run
+# sleeps tagged 800N so the host can find them. The point is that none of these
+# escapes the grant's cgroup, and all die when the grant ends.
+hold_escaping() { # hold_escaping NAME
+  vsh "sleep $HOLD_STDIN </dev/null 2>/dev/null | ssh -tt -i '$VWORK/$1/id_ed25519' \
+        -o CertificateFile='$VWORK/$1/id_ed25519-cert.pub' -o IdentitiesOnly=yes \
+        -o UserKnownHostsFile='$VWORK/$1/known_hosts' $PIN -o HostKeyAlias=$HOST_ID \
+        -o LogLevel=ERROR -o ConnectTimeout=20 -l $SSH_USER -- $GOT_HOST \
+        'setsid sh -c \"exec sleep 8001\" </dev/null >/dev/null 2>&1 & \
+         nohup sleep 8002 </dev/null >/dev/null 2>&1 & \
+         ( setsid sh -c \"exec sleep 8003\" </dev/null >/dev/null 2>&1 & ) ; \
+         echo held-$1; exec sleep 8000' > '$VWORK/$1.held' 2>&1 & echo \$! > '$VWORK/$1.pid'"
+  for _ in $(seq 1 30); do
+    vsh "grep -q held-$1 '$VWORK/$1.held'" 2>/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+# escapers_alive: how many of the four detached sleeps are running on the host.
+escapers_alive() { rsh "pgrep -u $SSH_USER -f 'sleep 800[0-3]' | wc -l" | tr -d '[:space:]'; }
+# escapers_loose: prints LOOSE if any escaper is running outside a grant cgroup.
+escapers_loose() {
+  rsh "for p in \$(pgrep -u $SSH_USER -f 'sleep 800[0-3]' 2>/dev/null); do \
+         grep -q 'grantd-' /proc/\$p/cgroup 2>/dev/null || { echo LOOSE; break; }; \
+       done" | tr -d '[:space:]'
 }
 
 # ----------------------------------------------------------------- the path
@@ -382,10 +406,10 @@ fi
 
 # ------------------------------------------------------------------ deadline
 #
-# A certificate's expiry stops new connections. The host's reaper is what ends
-# a session already open, and the documented bound is the deadline plus its
-# fifteen-second poll. Both ends of that are checked: a session is not ended
-# early, and it is ended by the bound. A bystander session under a different
+# A certificate's expiry stops new connections. The host's warden is what ends
+# a session already open, and the documented bound is the deadline plus a small
+# grace. Both ends of that are checked: a session is not ended early, and it is
+# ended by the bound. A bystander session under a different
 # grant is held open throughout and must survive both terminations, along
 # with this script's own root session, which every command here is proof of.
 
@@ -402,13 +426,17 @@ case "$SHORT_URL" in https://*) ok "minted a 60s grant" ;; *) bad "mint failed: 
 sleep 3
 redeem short "$SHORT_URL" >/dev/null 2>"$WORK/short.err" && ok "redeemed the 60s grant" \
   || { bad "redeem failed"; tail -3 "$WORK/short.err"; }
-if hold short 611; then
-  ok "session open under the 60s grant, running a process on the host"
+if hold_escaping short; then
+  ok "session open under the 60s grant, with detached escapers running"
 else
   bad "could not open a session under the 60s grant"
 fi
-[ "$(on_host 611)" -ge 1 ] && ok "the host is running the session's process" \
-  || bad "the session's process is not running on the host"
+sleep 2
+[ "$(escapers_alive)" -ge 4 ] && ok "the host is running the session's four processes" \
+  || bad "expected four processes on the host, found $(escapers_alive)"
+[ -z "$(escapers_loose)" ] \
+  && ok "every process, setsid and nohup and double-forked alike, is in the grant cgroup" \
+  || bad "a detached process escaped the grant cgroup"
 
 # Not before the deadline.
 while [ "$(date +%s)" -lt $((DEADLINE - 15)) ]; do sleep 2; done
@@ -421,17 +449,18 @@ while [ "$(date +%s)" -le $((BOUND + 30)) ]; do
   sleep 2
 done
 if [ -z "$ENDED" ]; then
-  bad "the session is still open $(( $(date +%s) - DEADLINE ))s after its deadline; the reaper did not end it"
+  bad "the session is still open $(( $(date +%s) - DEADLINE ))s after its deadline; the warden did not end it"
   vsh "kill \$(cat '$VWORK/short.pid') 2>/dev/null" || true
 elif [ "$ENDED" -le "$BOUND" ]; then
   ok "the host ended the session $((ENDED - DEADLINE))s after the deadline (bound: 30s)"
 else
   bad "the host ended the session, but $((ENDED - DEADLINE))s after the deadline (bound: 30s)"
 fi
-# The pty hung up, so the process it was running is gone with it.
-sleep 2
-[ "$(on_host 611)" -eq 0 ] && ok "the process the session was running is gone from the host" \
-  || bad "the session's process is still running on the host after the session ended"
+# Every escaper is gone, not just the pty's own sleep: cgroup.kill reaches the
+# setsid, nohup, and double-forked processes a name-matching reaper would miss.
+sleep 3
+[ "$(escapers_alive)" -eq 0 ] && ok "all four processes, detached ones included, are gone from the host" \
+  || bad "$(escapers_alive) detached processes survived the deadline"
 
 held_alive visit && ok "the bystander session under the other grant is still open" \
   || bad "the bystander session under an unrelated grant was ended too"
@@ -448,7 +477,7 @@ step "revocation ends a running session"
 REV_URL="$(mint 900)"; sleep 3
 redeem rev "$REV_URL" >/dev/null 2>"$WORK/rev.err" && ok "redeemed a 900s grant" \
   || { bad "redeem failed"; tail -3 "$WORK/rev.err"; }
-hold rev 613 && ok "session open under it" || bad "could not open a session under it"
+hold_escaping rev && ok "session open under it, with detached escapers" || bad "could not open a session under it"
 REVOKED_AT="$(date +%s)"
 revoke "$REV_URL"
 ENDED=""
@@ -464,9 +493,9 @@ elif [ $((ENDED - REVOKED_AT)) -le 30 ]; then
 else
   bad "revocation ended the session, but after $((ENDED - REVOKED_AT))s (bound: 30s)"
 fi
-sleep 2
-[ "$(on_host 613)" -eq 0 ] && ok "the process it was running is gone from the host" \
-  || bad "the revoked session's process is still running on the host"
+sleep 3
+[ "$(escapers_alive)" -eq 0 ] && ok "revocation killed every process, detached ones included" \
+  || bad "$(escapers_alive) detached processes survived revocation"
 held_alive visit && ok "the bystander session is still open" \
   || bad "the bystander session under an unrelated grant was ended by the revocation"
 

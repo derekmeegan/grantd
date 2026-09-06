@@ -13,8 +13,8 @@ installed: a URL, `curl`, and `ssh`.
 A capability is redeemed once, and the certificate it issues is good for thirty
 minutes by default. "Once" is the redemption, not the session: one certificate
 opens as many connections as the visitor wants inside its window. When the
-window closes, no new connection is possible, and a session still open is
-closed by a reaper on the host.
+window closes, no new connection is possible, and every process of a session
+still open is terminated inside the root-owned cgroup the host placed it in.
 
 The coordination service is a router, not a trust root. It never holds a
 private key or a grant secret, and compromising it entirely is not enough to
@@ -50,8 +50,8 @@ GRANTD_CAPABILITY='https://api.grantd.dev/g/h_ubk4.../g_4mmh...#uJN2fx...' sh re
 It verifies the host's signed registration, generates a throwaway SSH key,
 registers an identity, redeems the capability, checks the certificate against
 the host's CA, and prints the `ssh` command. Thirty minutes later the
-certificate stops authenticating new connections, and the host closes any
-session still running under it.
+certificate stops authenticating new connections, and the host terminates every
+process of any session still running under it.
 
 The URL can also be passed as an argument. On a shared machine prefer the
 variable or stdin (`sh redeem.sh -`), because other users can read command
@@ -376,17 +376,28 @@ one function where a mistake means two keys get access. Grants are free to mint.
 
 **Is the certificate revocable?** Not as a certificate — there is no CRL and
 nothing to publish. What you can do is revoke the grant, which stops any
-further redemption and makes the reaper close sessions running under it within
-about fifteen seconds. Keep TTLs short: that is still the design.
+further redemption and terminates every process of a session running under it
+within a couple of seconds. Keep TTLs short: that is still the design.
 
-**Does the deadline end an open session?** Yes, but not by itself. sshd checks
-a certificate when it authenticates, so expiry alone stops new connections and
-leaves a running session alone — that is OpenSSH's behaviour, not something
-grantd chose. A `grantd-reaper` timer closes the gap: every fifteen seconds it
-asks the signer which grants are done, matches them against the certificate ids
-sshd logged at authentication, and signals those sessions. It only ever signals
-a process sshd recorded as holding a grantd certificate, so an operator's own
-session is never in scope.
+**Does the deadline end an open session?** Yes. sshd checks a certificate only
+when it authenticates, so expiry alone would leave a running session alone —
+that is OpenSSH's behaviour. grantd closes the gap with containment, not log
+scraping: before any visitor code runs, a root-owned supervisor
+(`grant-warden`) places the session's sshd process into a per-grant cgroup v2
+subtree the visitor cannot leave, and at the deadline or on revocation it
+empties that subtree with `cgroup.kill`. Because the bound is the cgroup and
+not a process name, `nohup`, `setsid`, and double-forking do not escape it. The
+supervisor holds no keys; it learns the deadline from the signer over a
+read-only socket. Operator sessions and other grants are never in the
+termination target.
+
+**What exactly does the deadline guarantee?** Three different things, and only
+the first two are promised. **Certificate expiry** stops new authentication
+with that certificate. **Execution expiry** terminates every process inside the
+grant's containment boundary. **Persistent effects** — files the visitor wrote,
+secrets it copied, actions it took on other systems — are outside the guarantee
+and remain after it. grantd bounds execution; it is not a sandbox that undoes
+what ran.
 
 ## Status
 

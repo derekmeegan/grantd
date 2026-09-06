@@ -27,6 +27,9 @@ SIGNER_UNIT=/etc/systemd/system/grant-signer.service
 DAEMON_UNIT=/etc/systemd/system/grantd.service
 REAPER_UNIT=/etc/systemd/system/grantd-reaper.service
 REAPER_TIMER=/etc/systemd/system/grantd-reaper.timer
+WARDEN_UNIT=/etc/systemd/system/grant-warden.service
+SLICE_UNIT=/etc/systemd/system/grantd.slice
+PAM_SSHD=/etc/pam.d/sshd
 
 # ------------------------------------------------------------------- helpers
 
@@ -92,14 +95,23 @@ fi
 # ------------------------------------------------------------------ services
 
 log "stopping services"
-# The reaper timer first. Left armed with its script gone, it would fail
-# every fifteen seconds for the life of the machine.
+systemctl disable --now grant-warden.service 2>/dev/null || true
+systemctl stop grantd.slice 2>/dev/null || true
+# The old session reaper, if this is an upgrade from a version that had it.
+# Left armed with its script gone, its timer would fail every fifteen seconds.
 systemctl disable --now grantd-reaper.timer 2>/dev/null || true
 systemctl stop grantd-reaper.service 2>/dev/null || true
 systemctl disable --now grantd.service 2>/dev/null || true
 systemctl disable --now grant-signer.service 2>/dev/null || true
-rm -f "$DAEMON_UNIT" "$SIGNER_UNIT" "$REAPER_UNIT" "$REAPER_TIMER"
+rm -f "$DAEMON_UNIT" "$SIGNER_UNIT" "$WARDEN_UNIT" "$SLICE_UNIT" "$REAPER_UNIT" "$REAPER_TIMER"
 systemctl daemon-reload 2>/dev/null || true
+
+# The PAM session hook, removed before its binary goes. The block is exactly
+# the marker comment and the two session lines the installer appended.
+if [ -f "$PAM_SSHD" ] && grep -q 'grant-admit attach' "$PAM_SSHD"; then
+  sed -i '/# grantd: contain the enrolled visitor account/,+2d' "$PAM_SSHD"
+  log "removed the grantd PAM session hook from $PAM_SSHD"
+fi
 
 # ----------------------------------------------------------------- SSH trust
 #
@@ -161,8 +173,10 @@ if [ "$KEEP_USERS" -ne 1 ]; then
   log "removing service accounts"
   userdel grantd 2>/dev/null || true
   userdel grantsigner 2>/dev/null || true
+  userdel grantadmit 2>/dev/null || true
   groupdel grantd 2>/dev/null || true
   groupdel grantsigner 2>/dev/null || true
+  groupdel grantadmit 2>/dev/null || true
 fi
 
 cat <<DONE

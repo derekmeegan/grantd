@@ -16,7 +16,6 @@ import { docsMarkdown, grantInstructions } from "./routes/docs";
 // Imported as text so the script agents download is the one the test suite runs.
 import redeemScript from "../../install/redeem.sh";
 import installScriptFile from "../../install/install.sh";
-import reapSessionsScript from "../../install/reap-sessions.sh";
 import whitepaper from "../../docs/whitepaper.md";
 import redeemNodeScript from "../../install/redeem.mjs";
 import bridgeProxyScript from "../../install/bridge-proxy.py";
@@ -101,11 +100,6 @@ async function route(request: Request, env: Env): Promise<Response> {
   // a visitor runs is the one the test suite exercises.
   if (request.method === "GET" && seg[0] === "bridge-proxy.py") {
     return scriptResponse(bridgeProxyScript, "text/x-python; charset=utf-8");
-  }
-  // The session reaper, fetched by install.sh. Served from the single copy in
-  // install/ for the same reason as the redeemers.
-  if (request.method === "GET" && seg[0] === "reap-sessions.sh") {
-    return scriptResponse(reapSessionsScript);
   }
   if (request.method === "GET" && seg[0] === "install") {
     return scriptResponse(installScriptFile);

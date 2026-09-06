@@ -57,11 +57,12 @@ assert_nothing_installed() {
   assert_absent /etc/grantd.conf "public configuration removed"
   assert_absent /etc/systemd/system/grant-signer.service "signer unit removed"
   assert_absent /etc/systemd/system/grantd.service "daemon unit removed"
-  assert_absent /etc/systemd/system/grantd-reaper.service "reaper unit removed"
-  assert_absent /etc/systemd/system/grantd-reaper.timer "reaper timer removed"
+  assert_absent /etc/systemd/system/grant-warden.service "warden unit removed"
+  assert_absent /etc/systemd/system/grantd.slice "containment slice removed"
   assert_absent /run/grantd "runtime directory removed"
   assert_no_account grantd
   assert_no_account grantsigner
+  assert_no_account grantadmit
 }
 
 # assert_held_session_alive: the SSH session opened before the installs is
@@ -297,10 +298,10 @@ else
   ok "the visiting account cannot mint grants"
 fi
 
-if dsh "systemctl is-active --quiet grantd-reaper.timer"; then
-  ok "session reaper timer is armed"
+if dsh "systemctl is-active --quiet grant-warden.service"; then
+  ok "lifetime supervisor is running"
 else
-  bad "session reaper timer is not running; sessions outlive their grants"
+  bad "grant-warden.service is not running; sessions would be neither contained nor bounded"
 fi
 
 if [ -n "$URL" ]; then

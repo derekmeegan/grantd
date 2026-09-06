@@ -75,7 +75,7 @@ jobs:
         run: |
           set -eu
           mkdir -p ../bin
-          for c in grantd grant-signer; do
+          for c in grantd grant-signer grant-warden grant-admit; do
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
               go build -trimpath -ldflags "-s -w" -o "../bin/$c" "./cmd/$c"
           done

@@ -144,18 +144,6 @@ describe("public surface", () => {
     expect(text).toContain("only wss:// is supported");
   });
 
-  it("serves the session reaper, uncached", async () => {
-    const res = await SELF.fetch(`${ORIGIN}/reap-sessions.sh`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toContain("no-store");
-    const text = await res.text();
-    // It must only ever signal a process sshd recorded as holding a grantd
-    // certificate; a reaper that killed on any other basis could take out an
-    // operator's own session.
-    expect(text).toContain("ID grantd:");
-    expect(text).toContain("expired-grants");
-  });
-
   it("serves the text page on the apex and the API on api.", async () => {
     const home = await SELF.fetch("https://grantd.dev/");
     expect(home.status).toBe(200);
