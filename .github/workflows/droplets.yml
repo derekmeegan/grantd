@@ -8,16 +8,19 @@ name: droplets
 #
 # Unlike `native-amd64` in ci.yml, this installs the binaries built from the
 # checkout, so it can test a branch before anything is released. It still
-# needs the coordination service at `origin`, which is deployed by hand, so
-# like the other deployed-infrastructure suites it runs on demand and not on
-# every push. Choose the branch when dispatching it.
+# needs the coordination service at `origin`, which is deployed by hand. It
+# runs on every push to main, so a change that breaks the path from capability
+# URL to a terminated session is red on the commit that broke it, and on
+# demand against any branch.
 #
-# Requires a DIGITALOCEAN_TOKEN repository secret with write access to
+# Requires a DIGITAL_OCEAN_TOKEN repository secret with write access to
 # droplets and SSH keys. Droplets are tagged grantd-test-run-<run id>; the
 # last step sweeps that tag even when the job is cancelled, so a runner that
 # dies mid-test cannot leave a public SSH server behind.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       origin:
@@ -39,7 +42,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+  DIGITALOCEAN_TOKEN: ${{ secrets.DIGITAL_OCEAN_TOKEN }}
+  ORIGIN: ${{ github.event.inputs.origin || 'https://api.grantd.dev' }}
+  VERSION: ${{ github.event.inputs.version || '' }}
   RUN_TAG: grantd-test-run-${{ github.run_id }}
 
 jobs:
@@ -52,18 +57,18 @@ jobs:
       - name: the token is configured
         run: |
           if [ -z "$DIGITALOCEAN_TOKEN" ]; then
-            echo "::error::DIGITALOCEAN_TOKEN is not set; add it as a repository secret" >&2
+            echo "::error::DIGITAL_OCEAN_TOKEN is not set; add it as a repository secret" >&2
             exit 1
           fi
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        if: github.event.inputs.version == ''
+        if: env.VERSION == ''
         with:
           go-version-file: go/go.mod
           cache-dependency-path: go/go.sum
 
       - name: build the checkout for linux/amd64
-        if: github.event.inputs.version == ''
+        if: env.VERSION == ''
         working-directory: go
         # The same flags the release builder uses. Droplets are amd64
         # whatever the runner is.
@@ -79,12 +84,12 @@ jobs:
       - name: two droplets, host and visitor, end to end
         run: |
           set -eu
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            SOURCE="--version ${{ github.event.inputs.version }}"
+          if [ -n "$VERSION" ]; then
+            SOURCE="--version $VERSION"
           else
             SOURCE="--local-dir $PWD/bin"
           fi
-          tests/remote/digitalocean.sh --origin "${{ github.event.inputs.origin }}" $SOURCE
+          tests/remote/digitalocean.sh --origin "$ORIGIN" $SOURCE
 
       - name: sweep anything tagged with this run
         if: always()

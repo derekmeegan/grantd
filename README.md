@@ -344,10 +344,10 @@ is the machine running the script. It also holds a session open past its
 grant's deadline and checks the host ends it, and the process it was running,
 within the documented bound while a session under another grant survives.
 
-The same suite runs from GitHub Actions as the `droplets` workflow, on
-`workflow_dispatch` against whichever branch is chosen. It builds the checkout
+The same suite runs from GitHub Actions as the `droplets` workflow, on every
+push to main and on `workflow_dispatch` against any branch. It builds the checkout
 and installs those binaries with `--local-dir`, so it tests unreleased code; it
-needs a `DIGITALOCEAN_TOKEN` repository secret. Pass a `version` to install a
+needs a `DIGITAL_OCEAN_TOKEN` repository secret. Pass a `version` to install a
 published release instead. Droplets are tagged with the run id and swept by
 tag when the job ends, even if it was cancelled.
 
