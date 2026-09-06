@@ -109,6 +109,12 @@ func principals() {
 
 // attach fails the login unless the warden confirms the session is contained.
 func attach() {
+	// pam_exec runs session modules at both open and close. There is nothing to
+	// place at close, and no pending admission then, so acting on it would only
+	// log a spurious failure. Only the opening of a session is placed.
+	if t := os.Getenv("PAM_TYPE"); t != "" && t != "open_session" {
+		return
+	}
 	user := os.Getenv("PAM_USER")
 	if user == "" && len(os.Args) >= 3 {
 		user = os.Args[2]
