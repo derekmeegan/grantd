@@ -709,8 +709,7 @@ ExecStart=/usr/local/lib/grantd/grant-signer serve \
     --daemon-uid ${GRANTD_DAEMON_UID} \
     --daemon-gid ${GRANTD_DAEMON_GID} \
     --lifetime-sock /run/grantd/lifetime/lifetime.sock \
-    --lifetime-uid 0 \
-    --lifetime-gid 0
+    --lifetime-uid 0
 EnvironmentFile=/etc/grantd/signer.env
 
 Restart=always
