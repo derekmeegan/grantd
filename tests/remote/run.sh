@@ -498,9 +498,18 @@ else
     || ok "certificates issued before uninstall no longer authenticate"
   rsudo "rm -rf /opt/grantd-install" >/dev/null 2>&1 || true
   if [ "$USER_CREATED" -eq 1 ]; then
-    rsudo "userdel -r $SSH_USER" >/dev/null 2>&1 \
-      && ok "removed the account this script created" \
-      || bad "could not remove $SSH_USER"
+    # logind keeps the account's session scope and systemd --user instance
+    # for a few seconds after its last connection closes, and userdel refuses
+    # while any process still belongs to it. End the sessions and wait.
+    rsudo "loginctl terminate-user $SSH_USER 2>/dev/null; \
+           for _ in \$(seq 1 30); do pgrep -u $SSH_USER >/dev/null || exit 0; sleep 1; done; \
+           echo still running: >&2; ps -u $SSH_USER -o pid=,comm= >&2; exit 1" \
+      || bad "processes belonging to $SSH_USER outlived every session"
+    if rsudo "userdel -r $SSH_USER" > "$WORK/userdel.log" 2>&1; then
+      ok "removed the account this script created"
+    else
+      bad "could not remove $SSH_USER: $(tr '\n' ' ' < "$WORK/userdel.log")"
+    fi
   fi
 fi
 
