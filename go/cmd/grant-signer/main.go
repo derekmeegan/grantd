@@ -32,6 +32,9 @@ const (
 	// Each socket lives in its own setgid directory; see install/install.sh.
 	defaultOwnerSock  = "/run/grantd/owner/owner.sock"
 	defaultDaemonSock = "/run/grantd/redeem/redeem.sock"
+	// The lifetime socket is served only when asked for. Its directory is
+	// setgid root, so only root's supervisor can reach it.
+	defaultLifetimeSock = ""
 )
 
 // defaultHostKeyFile is where OpenSSH keeps the public half of the ed25519
@@ -73,10 +76,10 @@ func main() {
 		err = cmdInit(os.Args[2:], log)
 	case "serve":
 		err = cmdServe(os.Args[2:], log)
-	case "status":
-		err = cmdStatus(os.Args[2:])
 	case "expired-grants":
 		err = cmdExpiredGrants(os.Args[2:])
+	case "status":
+		err = cmdStatus(os.Args[2:])
 	case "destroy":
 		err = cmdDestroy(os.Args[2:], log)
 	case "-h", "--help", "help":
@@ -97,7 +100,7 @@ func usage() {
 
   grant-signer init    --ssh-user U (--hostname H | --dns-suffix D) [--port 22] [--origin URL]
                        [--ssh-host-key-file /etc/ssh/ssh_host_ed25519_key.pub]
-  grant-signer serve   [--owner-uid N] [--daemon-uid N]
+  grant-signer serve   [--owner-uid N] [--daemon-uid N] [--lifetime-sock PATH --lifetime-uid N]
   grant-signer status
   grant-signer expired-grants
   grant-signer destroy --yes
@@ -107,11 +110,12 @@ Common flags: --key-dir, --state, --owner-sock, --daemon-sock
 }
 
 type paths struct {
-	keyDir     string
-	state      string
-	ownerSock  string
-	daemonSock string
-	origin     string
+	keyDir       string
+	state        string
+	ownerSock    string
+	daemonSock   string
+	lifetimeSock string
+	origin       string
 }
 
 func (p *paths) bind(fs *flag.FlagSet) {
@@ -119,6 +123,8 @@ func (p *paths) bind(fs *flag.FlagSet) {
 	fs.StringVar(&p.state, "state", envOr("GRANTD_STATE", defaultStatePath), "path to the signer state database")
 	fs.StringVar(&p.ownerSock, "owner-sock", envOr("GRANTD_OWNER_SOCK", defaultOwnerSock), "owner Unix socket path")
 	fs.StringVar(&p.daemonSock, "daemon-sock", envOr("GRANTD_DAEMON_SOCK", defaultDaemonSock), "daemon Unix socket path")
+	fs.StringVar(&p.lifetimeSock, "lifetime-sock", envOr("GRANTD_LIFETIME_SOCK", defaultLifetimeSock),
+		"lifetime Unix socket path for the session supervisor (empty: not served)")
 	// The signer's origin is the public address that goes into capability
 	// URLs. The daemon's origin (GRANTD_ORIGIN) is where this machine dials
 	// out. Behind NAT or in a container the two differ.
@@ -300,8 +306,10 @@ func cmdServe(args []string, log *slog.Logger) error {
 	p.bind(fs)
 	ownerUID := fs.Int("owner-uid", -1, "uid permitted on the owner socket (-1 to rely on file permissions)")
 	daemonUID := fs.Int("daemon-uid", -1, "uid permitted on the daemon socket (-1 to rely on file permissions)")
+	lifetimeUID := fs.Int("lifetime-uid", 0, "uid permitted on the lifetime socket (-1 to rely on file permissions)")
 	ownerGID := fs.Int("owner-gid", -1, "group to own the owner socket (-1 to leave as created)")
 	daemonGID := fs.Int("daemon-gid", -1, "group to own the daemon socket (-1 to leave as created)")
+	lifetimeGID := fs.Int("lifetime-gid", -1, "group to own the lifetime socket (-1 to leave as created)")
 	purgeEvery := fs.Duration("purge-interval", 10*time.Minute, "how often to purge expired grants")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -326,6 +334,23 @@ func cmdServe(args []string, log *slog.Logger) error {
 		return err
 	}
 	defer daemonLn.Close()
+
+	// The lifetime socket exists for the session supervisor, which runs as
+	// root and holds no keys. It is served only when the installer asks.
+	var lifetimeSrv *http.Server
+	if p.lifetimeSock != "" {
+		lifetimeLn, err := listen(p.lifetimeSock, 0o660, *lifetimeUID, *lifetimeGID, log, "lifetime")
+		if err != nil {
+			return err
+		}
+		defer lifetimeLn.Close()
+		lifetimeSrv = socketServer(srv.LifetimeHandler())
+		go func() {
+			if err := lifetimeSrv.Serve(lifetimeLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("lifetime socket server stopped", "err", err)
+			}
+		}()
+	}
 
 	ownerSrv := socketServer(srv.OwnerHandler())
 	daemonSrv := socketServer(srv.DaemonHandler())
@@ -356,6 +381,9 @@ func cmdServe(args []string, log *slog.Logger) error {
 			defer cancel()
 			_ = ownerSrv.Shutdown(shutCtx)
 			_ = daemonSrv.Shutdown(shutCtx)
+			if lifetimeSrv != nil {
+				_ = lifetimeSrv.Shutdown(shutCtx)
+			}
 			log.Info("signer stopped")
 			return nil
 		case <-ticker.C:

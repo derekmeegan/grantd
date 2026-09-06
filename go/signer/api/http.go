@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/derekmeegan/grantd/go/internal/protocol"
@@ -46,6 +47,58 @@ func (s *Server) DaemonHandler() http.Handler {
 	mux.HandleFunc("POST /grants/{id}/published", s.markPublished)
 	mux.HandleFunc("GET /status", s.status)
 	return withRecover(mux, s.Log)
+}
+
+// LifetimeHandler serves the lifetime socket, for the supervisor that bounds
+// how long a session may run. It answers one question — what is the state of
+// this grant — and takes nothing but a grant id. It cannot mint, redeem,
+// revoke, or sign. The supervisor holds no key material and needs none: the
+// signer's copy of expires_at and revoked_at is the authority it enforces.
+func (s *Server) LifetimeHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /grants/{id}", s.lifetimeGrant)
+	mux.HandleFunc("GET /status", s.status)
+	return withRecover(mux, s.Log)
+}
+
+// LifetimeGrant is what the lifetime socket reports for one grant.
+type LifetimeGrant struct {
+	ID         string `json:"grant_id"`
+	SSHUser    string `json:"ssh_user"`
+	ExpiresAt  int64  `json:"expires_at"`
+	RedeemedAt *int64 `json:"redeemed_at"`
+	RevokedAt  *int64 `json:"revoked_at"`
+	// Serial of the certificate issued at redemption, as a decimal string, so
+	// a 64-bit value survives JSON. Empty until the grant is redeemed.
+	CertificateSerial string `json:"certificate_serial,omitempty"`
+}
+
+func (s *Server) lifetimeGrant(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !protocol.ValidGrantID(id) {
+		writeErr(w, protocol.ErrCodeBadRequest, "malformed grant id")
+		return
+	}
+	v, err := s.Signer.Store().GetGrantView(r.Context(), id)
+	if errors.Is(err, store.ErrGrantNotFound) {
+		writeErr(w, protocol.ErrCodeGrantNotFound, "no such grant")
+		return
+	}
+	if err != nil {
+		writeErr(w, protocol.ErrCodeInternal, err.Error())
+		return
+	}
+	out := LifetimeGrant{ID: v.ID, SSHUser: v.SSHUser, ExpiresAt: v.ExpiresAt,
+		RedeemedAt: v.RedeemedAt, RevokedAt: v.RevokedAt}
+	serial, ok, err := s.Signer.Store().CertificateSerial(r.Context(), id)
+	if err != nil {
+		writeErr(w, protocol.ErrCodeInternal, err.Error())
+		return
+	}
+	if ok {
+		out.CertificateSerial = strconv.FormatUint(serial, 10)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func withRecover(h http.Handler, log *slog.Logger) http.Handler {

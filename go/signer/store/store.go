@@ -511,6 +511,21 @@ func (s *Store) RecordCertificate(ctx context.Context, serial uint64, grantID, a
 	return err
 }
 
+// CertificateSerial returns the serial of the certificate issued for a grant.
+// ok is false if the grant has no certificate, which is the case until it is
+// redeemed.
+func (s *Store) CertificateSerial(ctx context.Context, grantID string) (serial uint64, ok bool, err error) {
+	var v int64
+	err = s.db.QueryRowContext(ctx, `SELECT serial FROM certificates WHERE grant_id = ?`, grantID).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return uint64(v), true, nil
+}
+
 // CertificateCount reports how many certificates have been issued, for tests
 // and status output.
 func (s *Store) CertificateCount(ctx context.Context) (int, error) {
