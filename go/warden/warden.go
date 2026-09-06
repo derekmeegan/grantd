@@ -340,7 +340,10 @@ func (w *Warden) Attach(ctx context.Context, caller Proc, user string) error {
 	w.mu.Unlock()
 
 	slice := w.sliceUnit(p.grantID)
-	if err := w.cfg.Systemd.StartSlice(ctx, slice, "grantd grant "+p.grantID); err != nil {
+	// A second connection under the same grant finds the slice already there.
+	// That is not a failure: only treat it as one if the slice cgroup is still
+	// absent afterwards.
+	if err := w.cfg.Systemd.StartSlice(ctx, slice, "grantd grant "+p.grantID); err != nil && !w.sliceCgroup(p.grantID).Exists() {
 		return fmt.Errorf("%w: cannot create %s: %v", ErrDenied, slice, err)
 	}
 	scope := w.scopeUnit(p.grantID, sshd.PID)

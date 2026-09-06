@@ -67,8 +67,14 @@ func (BusctlSystemd) StartSlice(ctx context.Context, name, description string) e
 		"CollectMode", "s", "inactive-or-failed",
 		"0"}
 	_, err := run(ctx, "busctl", args...)
-	if err != nil && strings.Contains(err.Error(), "already exists") {
-		return nil
+	if err != nil {
+		low := strings.ToLower(err.Error())
+		// A slice that already exists, or is already running, is exactly what
+		// we want. Only other failures matter.
+		if strings.Contains(low, "already exists") || strings.Contains(low, "already active") ||
+			strings.Contains(low, "file exists") {
+			return nil
+		}
 	}
 	return err
 }
