@@ -88,6 +88,23 @@ VSSH_OPTS="-o ConnectTimeout=15 -o BatchMode=yes ${GRANTD_VISITOR_SSH_OPTS:-${GR
 rsh()  { ssh $SSH_OPTS "$TARGET" "$@"; }
 rsudo(){ ssh $SSH_OPTS "$TARGET" "sudo bash -c '$1'"; }
 
+# On any uncaught failure, dump what the host's supervisor and sshd saw. The
+# droplet is destroyed on exit, so this is the only window to see why a login
+# was refused or a session was not contained.
+DIAGGED=0
+diag() {
+  [ "$DIAGGED" -eq 0 ] || return 0
+  DIAGGED=1
+  [ -n "${TARGET:-}" ] || return 0
+  printf '\n\033[1mdiagnostics from the host\033[0m\n' >&2
+  rsudo 'systemctl --no-pager --failed 2>/dev/null || true;
+         echo "=== grant-warden ==="; journalctl -u grant-warden.service -n 120 --no-pager 2>/dev/null || true;
+         echo "=== sshd ==="; journalctl -u ssh -n 100 --no-pager 2>/dev/null || true;
+         echo "=== auth.log ==="; tail -n 60 /var/log/auth.log 2>/dev/null || true;
+         echo "=== pam.d/sshd tail ==="; tail -n 8 /etc/pam.d/sshd 2>/dev/null || true' >&2 2>&1 || true
+}
+trap 'diag' ERR
+
 # Everything the visitor does goes through these two, so the same test runs
 # with the visitor on this machine or on another one. A command string is
 # handed to a shell either way; paths in it are paths on the visitor.
@@ -359,13 +376,20 @@ else
     "$SSH_USER"@*) ok "logged in across the network as $SSH_OUT" ;;
     *) bad "ssh failed: $SSH_OUT" ;;
   esac
+  # A second connection under the same grant must also be admitted and
+  # contained. This is where a per-connection correlation bug would first show.
+  SSH_OUT2="$(vssh visit "" 'whoami' 2>&1 | tr -d '\r' | tail -1)"
+  case "$SSH_OUT2" in
+    "$SSH_USER") ok "a second connection under the same grant is admitted" ;;
+    *) bad "second connection refused: $SSH_OUT2" ;;
+  esac
 fi
 # Cloudflare routed the grant and is now absent from the path: the host sees
 # the visitor's own address on the session, not an edge.
 if [ -n "$VISITOR" ]; then
-  SEEN="$(vssh visit "" 'echo $SSH_CONNECTION' 2>/dev/null | awk '{print $1}')"
+  SEEN="$( { vssh visit "" 'echo $SSH_CONNECTION' 2>/dev/null || true; } | awk '{print $1}')"
   # The address this script reached the visitor on is the visitor's public one.
-  VISITOR_ADDR="$(vsh 'echo $SSH_CONNECTION' 2>/dev/null | awk '{print $3}')"
+  VISITOR_ADDR="$( { vsh 'echo $SSH_CONNECTION' 2>/dev/null || true; } | awk '{print $3}')"
   [ -n "$SEEN" ] && [ "$SEEN" = "$VISITOR_ADDR" ] \
     && ok "the host sees the visitor's own address on the session ($SEEN)" \
     || bad "the host sees '$SEEN' on the session; the visitor's address is '$VISITOR_ADDR'"
